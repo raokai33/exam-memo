@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180" role="img" aria-label="高级工背题">
+  <rect width="180" height="180" rx="40" fill="#2f6df0"/>
+  <rect x="34" y="26" width="112" height="128" rx="14" fill="#ffffff"/>
+  <rect x="50" y="48" width="80" height="10" rx="5" fill="#2f6df0"/>
+  <rect x="50" y="70" width="80" height="10" rx="5" fill="#9db8f7"/>
+  <rect x="50" y="92" width="80" height="10" rx="5" fill="#9db8f7"/>
+  <rect x="50" y="118" width="46" height="10" rx="5" fill="#9db8f7"/>
+</svg>

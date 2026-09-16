@@ -1,0 +1,14 @@
+{
+  "name": "高级工背题",
+  "short_name": "背题",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#2f6df0",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
