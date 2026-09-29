@@ -1411,341 +1411,6 @@ function toRowMap(sheet) {
 __MODULES__["src/core/detect.mjs"] = { matchTypeWord: matchTypeWord, detectSheet: detectSheet, validateMapping: validateMapping, mappingFromDetection: mappingFromDetection, colIndex: colIndex, TYPE_WORDS: TYPE_WORDS, TYPE_LABELS: TYPE_LABELS, ROLE_OPTIONS: ROLE_OPTIONS, OPTION_LETTERS: OPTION_LETTERS };
 }());
 (function () {
-// 界面基础件 —— 手写 DOM 构造（设计档 §2.11.4）。
-// 铁律：文本一律用 textContent 赋值，绝不用 innerHTML（源表含 “” <> 等字符）。
-
-function el(tag, props, children) {
-  const node = document.createElement(tag);
-  if (props) {
-    for (const key of Object.keys(props)) {
-      const value = props[key];
-      if (value === undefined || value === null || value === false) continue;
-      if (key === 'class') node.className = value;
-      else if (key === 'text') node.textContent = String(value);
-      else if (key === 'on') {
-        for (const eventName of Object.keys(value)) node.addEventListener(eventName, value[eventName]);
-      } else if (key === 'dataset') {
-        for (const dataKey of Object.keys(value)) node.dataset[dataKey] = String(value[dataKey]);
-      } else if (key === 'style') {
-        node.setAttribute('style', value);
-      } else if (key === 'value') {
-        node.value = value;
-      } else if (key === 'disabled' || key === 'hidden' || key === 'checked') {
-        node[key] = true;
-      } else {
-        node.setAttribute(key, String(value));
-      }
-    }
-  }
-  add(node, children);
-  return node;
-}
-
-function add(node, children) {
-  if (children === undefined || children === null || children === false) return node;
-  if (Array.isArray(children)) {
-    for (const child of children) add(node, child);
-    return node;
-  }
-  if (typeof children === 'string' || typeof children === 'number') {
-    node.appendChild(document.createTextNode(String(children)));
-    return node;
-  }
-  node.appendChild(children);
-  return node;
-}
-
-function clear(node) {
-  if (typeof node.replaceChildren === 'function') node.replaceChildren();
-  else while (node.firstChild) node.removeChild(node.firstChild);
-  return node;
-}
-
-function byId(id) {
-  return document.getElementById(id);
-}
-
-__MODULES__["src/ui/dom.mjs"] = { el: el, add: add, clear: clear, byId: byId };
-}());
-(function () {
-// 题卡 —— 背题（§2.11.2 / R13：一次给全）与练习（§2.11.3 / R14 / R15 / R19）。
-
-const { blankCountOf } = __MODULES__["src/core/answers.mjs"];
-const { TYPE_LABELS } = __MODULES__["src/core/detect.mjs"];
-const { displayText } = __MODULES__["src/core/grade.mjs"];
-const { MODE_LABELS, TYPE_LABELS: GROUP_TYPE_LABELS } = __MODULES__["src/core/progress.mjs"];
-const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
-
-const MARK_LABELS = {
-  partial: '数据残缺',
-  outOfRange: '答案越界',
-  suspect: '题型存疑',
-  noAnswer: '无答案',
-  formatUnresolved: '数值格式无法还原',
-};
-
-/**
- * 渲染一张题卡（每次状态变化整体重画，界面简单、无中间态泄漏）。
- * @param {HTMLElement} container
- * @param {object} view
- */
-function renderCard(container, view) {
-  const question = view.question;
-  if (!question) {
-    clear(container);
-    add(container, el('main', { class: 'screen' }, [
-      el('p', { class: 'empty', text: view.emptyText || '这一组暂时没有题目。' }),
-      el('button', { class: 'btn', type: 'button', text: '返回入口', on: { click: view.onExit } }),
-    ]));
-    return;
-  }
-
-  const head = el('header', { class: 'card-head' }, [
-    el('div', { class: 'card-meta' }, [
-      el('span', { class: 'source-row', text: question.sourceRow }),
-      el('span', { class: 'chip chip-type', text: TYPE_LABELS[question.type] || question.type }),
-      ...(question.marks || []).map((mark) => el('span', { class: 'chip chip-mark', text: MARK_LABELS[mark] || mark })),
-    ]),
-    el('div', { class: 'card-actions' }, [
-      view.canRemoveWrong
-        ? el('button', {
-          class: 'btn btn-ghost remove-wrong',
-          type: 'button',
-          text: '移出本题',
-          on: { click: view.onRemoveWrong },
-        })
-        : null,
-      el('button', { class: 'btn btn-ghost', type: 'button', text: '退出', on: { click: view.onExit } }),
-    ]),
-  ]);
-
-  const body = el('section', { class: 'card-body' }, [el('p', { class: 'stem', text: question.stem })]);
-  body.appendChild(view.mode === 'memorize' ? renderMemorizeBody(question, view) : renderPracticeBody(question, view));
-
-  const foot = el('footer', { class: 'card-foot' }, [
-    el('button', {
-      class: 'btn',
-      type: 'button',
-      text: '上一题',
-      disabled: view.index <= 0,
-      on: { click: view.onPrev },
-    }),
-    el('span', {
-      class: 'counter',
-      text: `${view.index + 1} / ${view.total}`,
-    }),
-    el('button', {
-      class: 'btn btn-primary',
-      type: 'button',
-      text: '下一题',
-      disabled: view.index >= view.total - 1,
-      on: { click: view.onNext },
-    }),
-  ]);
-
-  const summary = el('p', {
-    class: 'card-summary',
-    text: `${MODE_LABELS[view.group.mode]} · ${GROUP_TYPE_LABELS[view.group.type] || view.group.type}` +
-      (view.accuracy === null ? '' : ` · 正确率 ${(view.accuracy * 100).toFixed(0)}%（${view.answeredCount} 题已答）`),
-  });
-
-  clear(container);
-  add(container, el('main', { class: 'screen' }, [
-    summary,
-    el('article', { class: 'card' }, [
-      head,
-      body,
-      // 末题答对后不循环，停在本卡并明示整组完成（§2.11.3 / R14）
-      view.completed ? el('p', { class: 'banner banner-ok completed', text: '本组已完成' }) : null,
-      el('div', { class: 'card-footer' }, [foot]),
-    ]),
-  ]));
-}
-
-/**
- * 背题题卡（R13）：一次给全，没有「看答案」也没有翻答案态。
- * 选择列全部选项原文（正确项高亮）/ 判断直接给「正确 / 错误」/ 填空原文 + 逐空原文 /
- * 简答题干 + 参考答案原文；不判分、不记录。
- */
-function renderMemorizeBody(question, view) {
-  const nodes = [];
-  if (question.type === 'single' || question.type === 'multi') {
-    nodes.push(renderOptions(question, view, { interactive: false, showCorrect: true }));
-  } else if (question.type === 'judge') {
-    nodes.push(judgeRow(question, { picked: null, interactive: false }));
-  }
-  nodes.push(answerBlock(question));
-  return el('div', { class: 'answer-zone' }, nodes);
-}
-
-function renderPracticeBody(question, view) {
-  const nodes = [];
-  const feedback = view.feedback;
-  const response = view.response || {};
-
-  if (question.type === 'single' || question.type === 'multi') {
-    nodes.push(renderOptions(question, view, { interactive: !feedback, showCorrect: !!feedback }));
-  } else if (question.type === 'judge') {
-    nodes.push(judgeRow(question, {
-      picked: response.judge,
-      interactive: !feedback,
-      onPick: (payload) => view.onPick(payload),
-    }));
-  } else if (question.type === 'fill') {
-    nodes.push(...fillZone(question, view, feedback));
-  } else if (question.type === 'essay') {
-    nodes.push(...essayZone(question, view));
-  }
-
-  if (question.type === 'multi' && !feedback) {
-    nodes.push(el('button', {
-      class: 'btn btn-primary',
-      type: 'button',
-      text: '提交',
-      on: { click: () => view.onSubmit({ letters: response.letters || [] }) },
-    }));
-  }
-
-  if (feedback) {
-    nodes.push(el('div', { class: `feedback ${feedback.correct ? 'ok' : 'bad'}` }, [
-      el('strong', { text: feedback.correct ? '答对了' : '答错了' }),
-      el('p', { class: 'answer-raw', text: `正确答案：${feedback.expectedDisplay}` }),
-    ]));
-  }
-  return el('div', { class: 'answer-zone' }, nodes);
-}
-
-/** 填空：每空一个输入框 + 提交（一次交全部空）。 */
-function fillZone(question, view, feedback) {
-  const nodes = [];
-  const values = (view.response || {}).values || [];
-  const blanks = Math.max(1, blankCountOf(question.stem) || question.answer.blanks || 1);
-  const inputs = [];
-  for (let i = 0; i < blanks; i++) {
-    const input = el('input', {
-      class: 'blank-input',
-      type: 'text',
-      inputmode: 'text',
-      placeholder: `第 ${i + 1} 空`,
-      disabled: !!feedback,
-    });
-    input.value = values[i] || '';
-    inputs.push(input);
-    nodes.push(el('label', { class: 'blank-row' }, [el('span', { class: 'blank-index', text: `第 ${i + 1} 空` }), input]));
-  }
-  if (!feedback) {
-    nodes.push(el('button', {
-      class: 'btn btn-primary',
-      type: 'button',
-      text: '提交',
-      on: { click: () => view.onSubmit({ values: inputs.map((input) => input.value) }) },
-    }));
-  }
-  return nodes;
-}
-
-/**
- * 简答（R19）：写答 → 提交 → 参考答案原文 → 自评「会了 / 不会」；
- * 全程不判分（app 层不调 grade()，对错来自自评）。
- */
-function essayZone(question, view) {
-  const stage = view.essayStage || 'write';
-  const nodes = [];
-  const input = el('textarea', { class: 'essay-input', rows: '3', disabled: stage !== 'write' });
-  input.value = view.essayDraft || '';
-  nodes.push(input);
-
-  if (stage === 'write') {
-    nodes.push(el('button', {
-      class: 'btn btn-primary',
-      type: 'button',
-      text: '提交',
-      on: { click: () => view.onEssaySubmit(input.value) },
-    }));
-    return nodes;
-  }
-  if (stage === 'assess') {
-    nodes.push(answerBlock(question));
-    nodes.push(el('div', { class: 'self-assess' }, [
-      el('button', {
-        class: 'btn btn-primary assess-yes', type: 'button', text: '会了',
-        on: { click: () => view.onSelfAssess(true) },
-      }),
-      el('button', {
-        class: 'btn assess-no', type: 'button', text: '不会',
-        on: { click: () => view.onSelfAssess(false) },
-      }),
-    ]));
-  }
-  return nodes;
-}
-
-/** 答案原文（+ 填空的逐空原文），背题与简答自评都用它。 */
-function answerBlock(question) {
-  const block = el('div', { class: 'answer-block' }, [
-    el('div', { class: 'answer-title', text: '答案' }),
-    el('p', { class: 'answer-raw', text: displayText(question) }),
-  ]);
-  if (question.type === 'fill') {
-    const segments = question.answer.segments;
-    if (Array.isArray(segments) && segments.length > 0) {
-      block.appendChild(el('ol', { class: 'blank-list' }, segments.map((segment, i) => el('li', { text: `第 ${i + 1} 空：${segment}` }))));
-    }
-  }
-  return block;
-}
-
-/** 判断题的两个按钮：正确 / 错误（练习态可点即判，背题态只呈现正确项）。 */
-function judgeRow(question, options) {
-  const answerJudge = question.answer.judge;
-  const pick = options.interactive ? options.onPick : null;
-  return el('div', { class: 'judge-row' }, [
-    el('button', {
-      class: judgeClass(options.picked, 'correct', answerJudge), type: 'button', text: '正确',
-      disabled: !options.interactive, on: pick ? { click: () => pick({ judge: 'correct' }) } : undefined,
-    }),
-    el('button', {
-      class: judgeClass(options.picked, 'wrong', answerJudge), type: 'button', text: '错误',
-      disabled: !options.interactive, on: pick ? { click: () => pick({ judge: 'wrong' }) } : undefined,
-    }),
-  ]);
-}
-
-function renderOptions(question, view, options) {
-  const response = view.response || {};
-  const letters = response.letters || (response.letter ? [response.letter] : []);
-  const correctLetters = (question.answer.letters || []).slice();
-  const nodes = question.options.map((option) => {
-    const classes = ['option'];
-    if (letters.indexOf(option.letter) >= 0) classes.push('selected');
-    if (options.showCorrect) {
-      if (correctLetters.indexOf(option.letter) >= 0) classes.push('correct');
-      else if (letters.indexOf(option.letter) >= 0) classes.push('wrong');
-    }
-    return el('button', {
-      class: classes.join(' '),
-      type: 'button',
-      disabled: !options.interactive,
-      on: options.interactive ? { click: () => view.onPick({ letter: option.letter }) } : undefined,
-    }, [
-      el('span', { class: 'option-letter', text: option.letter }),
-      el('span', { class: 'option-text', text: option.text }),
-    ]);
-  });
-  return el('div', { class: 'options' }, nodes);
-}
-
-function judgeClass(picked, value, answerJudge) {
-  const classes = ['btn'];
-  if (picked === value) classes.push('selected');
-  if (answerJudge && value === answerJudge) classes.push('correct');
-  if (answerJudge && picked === value && value !== answerJudge) classes.push('wrong');
-  return classes.join(' ');
-}
-
-__MODULES__["src/ui/card.mjs"] = { renderCard: renderCard };
-}());
-(function () {
 // ZIP 层 —— 中央目录解析与条目字节取回（设计档 §2.4.1 / §2.5.1）。
 // 零依赖：手写 ZIP 结构读取。规则全部写死，结构异常一律抛错，不猜偏移、不静默降级。
 
@@ -2302,6 +1967,594 @@ function rowHasUnresolvedFormat(sheet, rowNum, mapping) {
 __MODULES__["src/core/bank.mjs"] = { buildBank: buildBank, makeBankRecord: makeBankRecord, fingerprintOf: fingerprintOf, buildBankFromBytes: buildBankFromBytes, SCHEMA_VERSION: SCHEMA_VERSION };
 }());
 (function () {
+// 界面基础件 —— 手写 DOM 构造（设计档 §2.11.4）。
+// 铁律：文本一律用 textContent 赋值，绝不用 innerHTML（源表含 “” <> 等字符）。
+
+function el(tag, props, children) {
+  const node = document.createElement(tag);
+  if (props) {
+    for (const key of Object.keys(props)) {
+      const value = props[key];
+      if (value === undefined || value === null || value === false) continue;
+      if (key === 'class') node.className = value;
+      else if (key === 'text') node.textContent = String(value);
+      else if (key === 'on') {
+        for (const eventName of Object.keys(value)) node.addEventListener(eventName, value[eventName]);
+      } else if (key === 'dataset') {
+        for (const dataKey of Object.keys(value)) node.dataset[dataKey] = String(value[dataKey]);
+      } else if (key === 'style') {
+        node.setAttribute('style', value);
+      } else if (key === 'value') {
+        node.value = value;
+      } else if (key === 'disabled' || key === 'hidden' || key === 'checked') {
+        node[key] = true;
+      } else {
+        node.setAttribute(key, String(value));
+      }
+    }
+  }
+  add(node, children);
+  return node;
+}
+
+function add(node, children) {
+  if (children === undefined || children === null || children === false) return node;
+  if (Array.isArray(children)) {
+    for (const child of children) add(node, child);
+    return node;
+  }
+  if (typeof children === 'string' || typeof children === 'number') {
+    node.appendChild(document.createTextNode(String(children)));
+    return node;
+  }
+  node.appendChild(children);
+  return node;
+}
+
+function clear(node) {
+  if (typeof node.replaceChildren === 'function') node.replaceChildren();
+  else while (node.firstChild) node.removeChild(node.firstChild);
+  return node;
+}
+
+function byId(id) {
+  return document.getElementById(id);
+}
+
+__MODULES__["src/ui/dom.mjs"] = { el: el, add: add, clear: clear, byId: byId };
+}());
+(function () {
+// 会话持久化与诊断字段 —— 由 app.mjs 迁出（设计档 §2.4.4 / §2.10.3 / §2.11.6）。
+// 只经 app.store 的存储接口读写；界面状态由 app.mjs 持有。
+
+const { SCHEMA_VERSION } = __MODULES__["src/core/bank.mjs"];
+const { ensureProgress, entryMatrix, progressForStore } = __MODULES__["src/core/progress.mjs"];
+const { byId } = __MODULES__["src/ui/dom.mjs"];
+
+/** 读回错题本（题目集合 + 错次）；换表时连同进度一起备份，避免旧册子被后续写入覆盖（KD-13）。 */
+async function loadWrongbook(app, backup) {
+  if (!app.store) return;
+  try {
+    const wrong = await app.store.loadWrongbook();
+    const qids = wrong && Array.isArray(wrong.qids) ? wrong.qids : [];
+    const counts = wrong && wrong.counts && typeof wrong.counts === 'object' ? wrong.counts : {};
+    if (backup && qids.length > 0) await app.store.saveKey('wrongbook@old', wrong);
+    app.wrong = new Set(qids);
+    app.wrongCounts = { ...counts };
+  } catch (err) {
+    app.wrong = new Set();
+    app.wrongCounts = {};
+  }
+}
+
+/** 预读 14 组进度：进入题卡即用，不必等 IO。 */
+async function preloadProgress(app) {
+  if (!app.store) return;
+  for (const entry of entryMatrix()) {
+    try {
+      const stored = await app.store.loadProgress(entry.groupKey);
+      app.progressCache.set(entry.groupKey, ensureProgress(stored, entry.groupKey));
+    } catch (err) {
+      app.progressCache.set(entry.groupKey, ensureProgress(null, entry.groupKey));
+    }
+  }
+}
+
+/** 读回界面偏好（开关状态 / 关闭过的提示条）。 */
+async function loadUiState(app) {
+  if (!app.store) return;
+  try {
+    app.uiState = await app.store.loadUi();
+  } catch (err) {
+    app.uiState = null;
+  }
+}
+
+/** 保存当前组进度；集合型入口不落 order / index（§2.10.3）。 */
+function persistProgress(app) {
+  if (!app.store || !app.group || !app.progress) return;
+  // 落盘形状按 §2.10.3：带上该组当前的 order / index（集合型入口由 progressForStore 剥掉）
+  const payload = progressForStore(
+    Object.assign({}, app.progress, { order: app.order.slice(), index: app.index }),
+    app.group.groupKey,
+  );
+  app.progressCache.set(app.group.groupKey, app.progress);
+  app.store.saveProgress(app.group.groupKey, payload).catch((err) => console.error('进度保存失败', err));
+}
+
+function persistWrongbook(app) {
+  if (!app.store) return Promise.resolve();
+  return app.store.saveWrongbook({ qids: Array.from(app.wrong), counts: { ...app.wrongCounts } }).catch((err) => {
+    console.error('错题本保存失败', err);
+  });
+}
+
+/** 保存界面偏好（开关状态 / 关闭过的提示条）；存储不可用时静默跳过。 */
+function saveUiState(app) {
+  if (!app.store) return;
+  app.store.saveUi(app.uiState).catch((err) => console.error('界面偏好保存失败', err));
+}
+
+/** 诊断字段（§2.4.4）：页面不显示但 DOM 中稳定存在，无头实测与真机排障都读它。 */
+function writeDiag(app) {
+  const node = byId('diag');
+  if (!node) return;
+  const store = app.storeInfo || { backend: 'memory', persistent: false };
+  node.textContent = [
+    `version=${SCHEMA_VERSION}`,
+    `sheets=${app.bank && app.bank.sheets ? app.bank.sheets.length : 0}`,
+    `bank=${app.bank && app.bank.questions ? app.bank.questions.length : 0}`,
+    `store=${store.backend}`,
+    `persist=${store.persistent ? 'yes' : 'no'}`,
+    `import=${Math.round(app.importMs)}`,
+    `render=${Math.round(app.renderMs)}`,
+    `ready=${Math.round(app.readyMs)}`,
+    `inflate=${app.inflate.ok ? 'deflate-raw' : 'unsupported'}`,
+  ].join(' ');
+}
+
+__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, preloadProgress: preloadProgress, loadUiState: loadUiState, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag };
+}());
+(function () {
+// 题库装载（N8 拆分自 app.mjs）：读存储 / 内嵌题库、换表备份与重绘（§2.10.3 / §2.4.2）。
+// 装载结束时的整体重绘由调用方传入 render，避免本模块反向依赖 app.mjs。
+const { entryMatrix } = __MODULES__["src/core/progress.mjs"];
+const { backupProgress } = __MODULES__["src/core/store.mjs"];
+const { loadUiState, loadWrongbook, preloadProgress } = __MODULES__["src/ui/session.mjs"];
+
+/** 启动装载：已存题库优先；单文件形态的内嵌题库与已存指纹不一致时按换表处理（§2.10.3）。 */
+async function loadBank(app, opts, render) {
+  let record = null;
+  if (app.store) {
+    try { record = await app.store.loadBank(); } catch (err) { record = null; }
+  }
+  const embedded = opts.bank || globalThis.EXAM_MEMO_BANK || null;
+  const embed = embedded && Array.isArray(embedded.questions) ? embedded : null;
+  // 单文件形态：内嵌题库就是「本次导入」，与已存题库指纹不一致时按换表处理（§2.10.3）
+  const stale = !!(record && embed && embed.bankFingerprint && record.bankFingerprint
+    && embed.bankFingerprint !== record.bankFingerprint);
+
+  if (stale) {
+    app.bank = record; // 让 adoptBank 看到「已存题库」以便比对与备份
+    await adoptBank(app, embed, render);
+  } else if (record || embed) {
+    app.bank = record || embed;
+    indexQuestions(app);
+    await loadWrongbook(app, false);
+    if (app.store && !record) {
+      try { await app.store.saveBank(embed); } catch (err) { console.error('内置题库写入存储失败', err); }
+    }
+    await preloadProgress(app);
+  }
+  await loadUiState(app);
+}
+
+/** 采用一份题库（导入 / 内嵌）：指纹变了就备份旧进度并如实告知（§2.10.3 / KD-13）。 */
+async function adoptBank(app, record, render) {
+  const previous = app.bank;
+  const changed = !!(previous && previous.bankFingerprint && record.bankFingerprint
+    && previous.bankFingerprint !== record.bankFingerprint);
+  await loadWrongbook(app, changed);
+  if (changed && app.store) {
+    const groups = entryMatrix().map((entry) => entry.groupKey);
+    const backed = await backupProgress(app.store, groups);
+    app.notice = `题库已变化，进度将按题号重新对齐（旧的 ${backed} 组进度已备份为 progress:<组>@old）。`;
+  }
+  app.bank = record;
+  indexQuestions(app);
+  if (app.store) {
+    try { await app.store.saveBank(record); } catch (err) { console.error('题库保存失败', err); }
+  }
+  await preloadProgress(app);
+  app.view = 'matrix';
+  render(app);
+}
+
+/** 题目 id → 题目 的索引（游标、错题本与背题揭示都按 id 定位）。 */
+function indexQuestions(app) {
+  app.questionIndex = new Map(((app.bank && app.bank.questions) || []).map((q) => [q.id, q]));
+}
+
+__MODULES__["src/ui/bank-load.mjs"] = { loadBank: loadBank, adoptBank: adoptBank, indexQuestions: indexQuestions };
+}());
+(function () {
+// 滑动手势（R26 / §2.11.7④）：纯函数判据与 DOM 适配器分离。
+// 不 preventDefault（不吞页面滚动与输入框手势）、不引第三方库（N5 零依赖）、不用 closest()（DOM 桩不支持）。
+
+/** 触发滑动的最小水平位移（像素）。 */
+const SWIPE_MIN_PX = 48;
+/** 方向占优比：水平位移须大于垂直位移的这么多倍才判为切题。 */
+const SWIPE_DOMINANCE = 1.5;
+/** 左缘保护带（像素）：起点在此之内不判右滑（避开 iOS 边缘返回手势）。 */
+const SWIPE_EDGE_GUARD_PX = 24;
+
+const EDITABLE_TAGS = ['INPUT', 'TEXTAREA', 'SELECT'];
+
+/**
+ * 纯判据：左滑 → `'next'`，右滑 → `'prev'`，其余（不足阈值 / 方向不占优）→ `null`。
+ * 判定式：`|dx| ≥ SWIPE_MIN_PX && |dx| > SWIPE_DOMINANCE·|dy|`（AC-37）。
+ */
+function swipeDirection(dx, dy) {
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+  if (Math.abs(dx) < SWIPE_MIN_PX) return null;
+  if (Math.abs(dx) <= SWIPE_DOMINANCE * Math.abs(dy)) return null;
+  return dx < 0 ? 'next' : 'prev';
+}
+
+/** 起点是否落在输入控件内：沿 `parentNode` 链逐级查 `tagName`（DOM 桩没有 `closest()`）。 */
+function inEditable(node) {
+  let current = node;
+  while (current) {
+    if (EDITABLE_TAGS.indexOf(String(current.tagName || '').toUpperCase()) >= 0) return true;
+    current = current.parentNode;
+  }
+  return false;
+}
+
+/** 取触摸列表里第一个触点的坐标（touchstart 用 touches，touchend 用 changedTouches）。 */
+function firstPoint(event, key) {
+  const list = event ? event[key] : null;
+  if (!list || list.length === 0) return null;
+  const touch = list[0];
+  if (!touch) return null;
+  return { x: touch.clientX, y: touch.clientY };
+}
+
+/**
+ * 把左右滑动切题绑到元素上，返回 `detach()`。
+ * 边界（写死）：多指（`touches.length > 1`）忽略；起点在 `input` / `textarea` / `select` 内忽略；
+ * 起点距左缘 < `SWIPE_EDGE_GUARD_PX` 不判右滑。
+ */
+function attachSwipe(el, handlers) {
+  const opts = handlers || {};
+  const onPrev = typeof opts.onPrev === 'function' ? opts.onPrev : null;
+  const onNext = typeof opts.onNext === 'function' ? opts.onNext : null;
+  let start = null;
+  let detached = false;
+
+  const onStart = (event) => {
+    if (detached) return;
+    const touches = event ? event.touches : null;
+    if (!touches || touches.length !== 1) { start = null; return; } // 多指忽略
+    const point = firstPoint(event, 'touches');
+    if (!point || inEditable(event.target)) { start = null; return; }
+    start = { x: point.x, y: point.y, guarded: point.x < SWIPE_EDGE_GUARD_PX };
+  };
+
+  const onEnd = (event) => {
+    if (detached) return;
+    const from = start;
+    start = null;
+    if (!from) return;
+    const point = firstPoint(event, 'changedTouches');
+    if (!point) return;
+    const direction = swipeDirection(point.x - from.x, point.y - from.y);
+    if (direction === 'prev') {
+      if (from.guarded) return; // 左缘保护带：起点贴左缘不判右滑
+      if (onPrev) onPrev();
+    } else if (direction === 'next' && onNext) {
+      onNext();
+    }
+  };
+
+  el.addEventListener('touchstart', onStart);
+  el.addEventListener('touchend', onEnd);
+  return function detach() {
+    detached = true;
+    // DOM 桩没有 removeEventListener：有才调（§2.11.7④）
+    if (typeof el.removeEventListener === 'function') {
+      el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchend', onEnd);
+    }
+  };
+}
+
+__MODULES__["src/ui/gesture.mjs"] = { swipeDirection: swipeDirection, attachSwipe: attachSwipe, SWIPE_MIN_PX: SWIPE_MIN_PX, SWIPE_DOMINANCE: SWIPE_DOMINANCE, SWIPE_EDGE_GUARD_PX: SWIPE_EDGE_GUARD_PX };
+}());
+(function () {
+// 题卡 —— 背题（§2.11.2 / R13 / R24：延迟揭示）与练习（§2.11.3 / R14 / R15 / R19 / R26）。
+
+const { blankCountOf } = __MODULES__["src/core/answers.mjs"];
+const { TYPE_LABELS } = __MODULES__["src/core/detect.mjs"];
+const { displayText } = __MODULES__["src/core/grade.mjs"];
+const { MODE_LABELS, TYPE_LABELS: GROUP_TYPE_LABELS } = __MODULES__["src/core/progress.mjs"];
+const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
+const { attachSwipe } = __MODULES__["src/ui/gesture.mjs"];
+
+const MARK_LABELS = {
+  partial: '数据残缺',
+  outOfRange: '答案越界',
+  suspect: '题型存疑',
+  noAnswer: '无答案',
+  formatUnresolved: '数值格式无法还原',
+};
+
+/**
+ * 渲染一张题卡（每次状态变化整体重画，界面简单、无中间态泄漏）。
+ * @param {HTMLElement} container
+ * @param {object} view
+ */
+function renderCard(container, view) {
+  const question = view.question;
+  if (!question) {
+    clear(container);
+    add(container, el('main', { class: 'screen' }, [
+      el('p', { class: 'empty', text: view.emptyText || '这一组暂时没有题目。' }),
+      el('button', { class: 'btn', type: 'button', text: '返回入口', on: { click: view.onExit } }),
+    ]));
+    return;
+  }
+
+  const head = el('header', { class: 'card-head' }, [
+    el('div', { class: 'card-meta' }, [
+      el('span', { class: 'source-row', text: question.sourceRow }),
+      el('span', { class: 'chip chip-type', text: TYPE_LABELS[question.type] || question.type }),
+      ...(question.marks || []).map((mark) => el('span', { class: 'chip chip-mark', text: MARK_LABELS[mark] || mark })),
+    ]),
+    el('div', { class: 'card-actions' }, [
+      view.canRemoveWrong
+        ? el('button', {
+          class: 'btn btn-ghost remove-wrong',
+          type: 'button',
+          text: '移出本题',
+          on: { click: view.onRemoveWrong },
+        })
+        : null,
+      el('button', { class: 'btn btn-ghost', type: 'button', text: '退出', on: { click: view.onExit } }),
+    ]),
+  ]);
+
+  const body = el('section', { class: 'card-body' }, [el('p', { class: 'stem', text: question.stem })]);
+  body.appendChild(view.mode === 'memorize' ? renderMemorizeBody(question, view) : renderPracticeBody(question, view));
+
+  const foot = el('footer', { class: 'card-foot' }, [
+    el('button', {
+      class: 'btn',
+      type: 'button',
+      text: '上一题',
+      disabled: view.index <= 0,
+      on: { click: view.onPrev },
+    }),
+    el('span', {
+      class: 'counter',
+      text: `${view.index + 1} / ${view.total}`,
+    }),
+    el('button', {
+      class: 'btn btn-primary',
+      type: 'button',
+      text: '下一题',
+      disabled: view.index >= view.total - 1,
+      on: { click: view.onNext },
+    }),
+  ]);
+
+  const summary = el('p', {
+    class: 'card-summary',
+    text: `${MODE_LABELS[view.group.mode]} · ${GROUP_TYPE_LABELS[view.group.type] || view.group.type}` +
+      (view.accuracy === null ? '' : ` · 正确率 ${(view.accuracy * 100).toFixed(0)}%（${view.answeredCount} 题已答）`),
+  });
+
+  const screen = el('main', { class: 'screen' }, [
+    summary,
+    el('article', { class: 'card' }, [
+      head,
+      body,
+      // 末题答对后不循环，停在本卡并明示整组完成（§2.11.3 / R14）
+      view.completed ? el('p', { class: 'banner banner-ok completed', text: '本组已完成' }) : null,
+      // 底栏常驻（R25）：`上一题 / 计数 / 下一题`由 style.css 固定到屏幕底部
+      el('div', { class: 'card-footer' }, [foot]),
+    ]),
+  ]);
+  // 左右滑动切题（R26）：与「上一题 / 下一题」同一条路径（`move(app, ±1)`，先取消已排程的自动前进）
+  attachSwipe(screen, { onPrev: view.onPrev, onNext: view.onNext });
+  clear(container);
+  add(container, screen);
+}
+
+/**
+ * 背题题卡（R13 / R24）：首屏只给题干与全部选项原文；延迟揭示到点后再补正确项高亮与答案原文。
+ * 没有「看答案」控件、没有翻答案状态；不判分、不记录；未置位（`answerShown !== true`）一律 fail-closed。
+ */
+function renderMemorizeBody(question, view) {
+  const shown = view.answerShown === true; // §2.11.7②：fail-closed
+  const nodes = [];
+  if (question.type === 'single' || question.type === 'multi') {
+    nodes.push(renderOptions(question, view, { interactive: false, showCorrect: shown }));
+  } else if (question.type === 'judge') {
+    nodes.push(judgeRow(question, { picked: null, interactive: false, showAnswer: shown }));
+  }
+  if (shown) nodes.push(answerBlock(question));
+  return el('div', { class: 'answer-zone' }, nodes);
+}
+
+function renderPracticeBody(question, view) {
+  const nodes = [];
+  const feedback = view.feedback;
+  const response = view.response || {};
+
+  if (question.type === 'single' || question.type === 'multi') {
+    nodes.push(renderOptions(question, view, { interactive: !feedback, showCorrect: !!feedback }));
+  } else if (question.type === 'judge') {
+    nodes.push(judgeRow(question, {
+      picked: response.judge,
+      interactive: !feedback,
+      onPick: (payload) => view.onPick(payload),
+    }));
+  } else if (question.type === 'fill') {
+    nodes.push(...fillZone(question, view, feedback));
+  } else if (question.type === 'essay') {
+    nodes.push(...essayZone(question, view));
+  }
+
+  if (question.type === 'multi' && !feedback) {
+    nodes.push(el('button', {
+      class: 'btn btn-primary',
+      type: 'button',
+      text: '提交',
+      on: { click: () => view.onSubmit({ letters: response.letters || [] }) },
+    }));
+  }
+
+  if (feedback) {
+    nodes.push(el('div', { class: `feedback ${feedback.correct ? 'ok' : 'bad'}` }, [
+      el('strong', { text: feedback.correct ? '答对了' : '答错了' }),
+      el('p', { class: 'answer-raw', text: `正确答案：${feedback.expectedDisplay}` }),
+    ]));
+  }
+  return el('div', { class: 'answer-zone' }, nodes);
+}
+
+/** 填空：每空一个输入框 + 提交（一次交全部空）。 */
+function fillZone(question, view, feedback) {
+  const nodes = [];
+  const values = (view.response || {}).values || [];
+  const blanks = Math.max(1, blankCountOf(question.stem) || question.answer.blanks || 1);
+  const inputs = [];
+  for (let i = 0; i < blanks; i++) {
+    const input = el('input', {
+      class: 'blank-input',
+      type: 'text',
+      inputmode: 'text',
+      placeholder: `第 ${i + 1} 空`,
+      disabled: !!feedback,
+    });
+    input.value = values[i] || '';
+    inputs.push(input);
+    nodes.push(el('label', { class: 'blank-row' }, [el('span', { class: 'blank-index', text: `第 ${i + 1} 空` }), input]));
+  }
+  if (!feedback) {
+    nodes.push(el('button', {
+      class: 'btn btn-primary',
+      type: 'button',
+      text: '提交',
+      on: { click: () => view.onSubmit({ values: inputs.map((input) => input.value) }) },
+    }));
+  }
+  return nodes;
+}
+
+/**
+ * 简答（R19）：写答 → 提交 → 参考答案原文 → 自评「会了 / 不会」；
+ * 全程不判分（app 层不调 grade()，对错来自自评）。
+ */
+function essayZone(question, view) {
+  const stage = view.essayStage || 'write';
+  const nodes = [];
+  const input = el('textarea', { class: 'essay-input', rows: '3', disabled: stage !== 'write' });
+  input.value = view.essayDraft || '';
+  nodes.push(input);
+
+  if (stage === 'write') {
+    nodes.push(el('button', {
+      class: 'btn btn-primary',
+      type: 'button',
+      text: '提交',
+      on: { click: () => view.onEssaySubmit(input.value) },
+    }));
+    return nodes;
+  }
+  if (stage === 'assess') {
+    nodes.push(answerBlock(question));
+    nodes.push(el('div', { class: 'self-assess' }, [
+      el('button', {
+        class: 'btn btn-primary assess-yes', type: 'button', text: '会了',
+        on: { click: () => view.onSelfAssess(true) },
+      }),
+      el('button', {
+        class: 'btn assess-no', type: 'button', text: '不会',
+        on: { click: () => view.onSelfAssess(false) },
+      }),
+    ]));
+  }
+  return nodes;
+}
+
+/** 答案原文（+ 填空的逐空原文），背题与简答自评都用它。 */
+function answerBlock(question) {
+  const block = el('div', { class: 'answer-block' }, [
+    el('div', { class: 'answer-title', text: '答案' }),
+    el('p', { class: 'answer-raw', text: displayText(question) }),
+  ]);
+  if (question.type === 'fill') {
+    const segments = question.answer.segments;
+    if (Array.isArray(segments) && segments.length > 0) {
+      block.appendChild(el('ol', { class: 'blank-list' }, segments.map((segment, i) => el('li', { text: `第 ${i + 1} 空：${segment}` }))));
+    }
+  }
+  return block;
+}
+
+/** 判断题的两个按钮：正确 / 错误（练习态可点即判；背题态 `showAnswer` 为真才标出正确项）。 */
+function judgeRow(question, options) {
+  const answerJudge = options.showAnswer === false ? null : question.answer.judge;
+  const pick = options.interactive ? options.onPick : null;
+  return el('div', { class: 'judge-row' }, [
+    el('button', {
+      class: judgeClass(options.picked, 'correct', answerJudge), type: 'button', text: '正确',
+      disabled: !options.interactive, on: pick ? { click: () => pick({ judge: 'correct' }) } : undefined,
+    }),
+    el('button', {
+      class: judgeClass(options.picked, 'wrong', answerJudge), type: 'button', text: '错误',
+      disabled: !options.interactive, on: pick ? { click: () => pick({ judge: 'wrong' }) } : undefined,
+    }),
+  ]);
+}
+
+function renderOptions(question, view, options) {
+  const response = view.response || {};
+  const letters = response.letters || (response.letter ? [response.letter] : []);
+  const correctLetters = (question.answer.letters || []).slice();
+  const nodes = question.options.map((option) => {
+    const classes = ['option'];
+    if (letters.indexOf(option.letter) >= 0) classes.push('selected');
+    if (options.showCorrect) {
+      if (correctLetters.indexOf(option.letter) >= 0) classes.push('correct');
+      else if (letters.indexOf(option.letter) >= 0) classes.push('wrong');
+    }
+    return el('button', {
+      class: classes.join(' '),
+      type: 'button',
+      disabled: !options.interactive,
+      on: options.interactive ? { click: () => view.onPick({ letter: option.letter }) } : undefined,
+    }, [
+      el('span', { class: 'option-letter', text: option.letter }),
+      el('span', { class: 'option-text', text: option.text }),
+    ]);
+  });
+  return el('div', { class: 'options' }, nodes);
+}
+
+function judgeClass(picked, value, answerJudge) {
+  const classes = ['btn'];
+  if (picked === value) classes.push('selected');
+  if (answerJudge && value === answerJudge) classes.push('correct');
+  if (answerJudge && picked === value && value !== answerJudge) classes.push('wrong');
+  return classes.join(' ');
+}
+
+__MODULES__["src/ui/card.mjs"] = { renderCard: renderCard };
+}());
+(function () {
 // 导入流程与列映射确认页（设计档 §2.6.5 / §2.11.5 / §2.12.1）。
 // 识别结果先展示后入库：用户确认之前，存储层不会出现题库记录。
 
@@ -2703,98 +2956,6 @@ function errorMessage(err) {
 __MODULES__["src/ui/import.mjs"] = { createImportFlow: createImportFlow, countRoles: countRoles };
 }());
 (function () {
-// 会话持久化与诊断字段 —— 由 app.mjs 迁出（设计档 §2.4.4 / §2.10.3 / §2.11.6）。
-// 只经 app.store 的存储接口读写；界面状态由 app.mjs 持有。
-
-const { SCHEMA_VERSION } = __MODULES__["src/core/bank.mjs"];
-const { ensureProgress, entryMatrix, progressForStore } = __MODULES__["src/core/progress.mjs"];
-const { byId } = __MODULES__["src/ui/dom.mjs"];
-
-/** 读回错题本（题目集合 + 错次）；换表时连同进度一起备份，避免旧册子被后续写入覆盖（KD-13）。 */
-async function loadWrongbook(app, backup) {
-  if (!app.store) return;
-  try {
-    const wrong = await app.store.loadWrongbook();
-    const qids = wrong && Array.isArray(wrong.qids) ? wrong.qids : [];
-    const counts = wrong && wrong.counts && typeof wrong.counts === 'object' ? wrong.counts : {};
-    if (backup && qids.length > 0) await app.store.saveKey('wrongbook@old', wrong);
-    app.wrong = new Set(qids);
-    app.wrongCounts = { ...counts };
-  } catch (err) {
-    app.wrong = new Set();
-    app.wrongCounts = {};
-  }
-}
-
-/** 预读 14 组进度：进入题卡即用，不必等 IO。 */
-async function preloadProgress(app) {
-  if (!app.store) return;
-  for (const entry of entryMatrix()) {
-    try {
-      const stored = await app.store.loadProgress(entry.groupKey);
-      app.progressCache.set(entry.groupKey, ensureProgress(stored, entry.groupKey));
-    } catch (err) {
-      app.progressCache.set(entry.groupKey, ensureProgress(null, entry.groupKey));
-    }
-  }
-}
-
-/** 读回界面偏好（开关状态 / 关闭过的提示条）。 */
-async function loadUiState(app) {
-  if (!app.store) return;
-  try {
-    app.uiState = await app.store.loadUi();
-  } catch (err) {
-    app.uiState = null;
-  }
-}
-
-/** 保存当前组进度；集合型入口不落 order / index（§2.10.3）。 */
-function persistProgress(app) {
-  if (!app.store || !app.group || !app.progress) return;
-  // 落盘形状按 §2.10.3：带上该组当前的 order / index（集合型入口由 progressForStore 剥掉）
-  const payload = progressForStore(
-    Object.assign({}, app.progress, { order: app.order.slice(), index: app.index }),
-    app.group.groupKey,
-  );
-  app.progressCache.set(app.group.groupKey, app.progress);
-  app.store.saveProgress(app.group.groupKey, payload).catch((err) => console.error('进度保存失败', err));
-}
-
-function persistWrongbook(app) {
-  if (!app.store) return Promise.resolve();
-  return app.store.saveWrongbook({ qids: Array.from(app.wrong), counts: { ...app.wrongCounts } }).catch((err) => {
-    console.error('错题本保存失败', err);
-  });
-}
-
-/** 保存界面偏好（开关状态 / 关闭过的提示条）；存储不可用时静默跳过。 */
-function saveUiState(app) {
-  if (!app.store) return;
-  app.store.saveUi(app.uiState).catch((err) => console.error('界面偏好保存失败', err));
-}
-
-/** 诊断字段（§2.4.4）：页面不显示但 DOM 中稳定存在，无头实测与真机排障都读它。 */
-function writeDiag(app) {
-  const node = byId('diag');
-  if (!node) return;
-  const store = app.storeInfo || { backend: 'memory', persistent: false };
-  node.textContent = [
-    `version=${SCHEMA_VERSION}`,
-    `sheets=${app.bank && app.bank.sheets ? app.bank.sheets.length : 0}`,
-    `bank=${app.bank && app.bank.questions ? app.bank.questions.length : 0}`,
-    `store=${store.backend}`,
-    `persist=${store.persistent ? 'yes' : 'no'}`,
-    `import=${Math.round(app.importMs)}`,
-    `render=${Math.round(app.renderMs)}`,
-    `ready=${Math.round(app.readyMs)}`,
-    `inflate=${app.inflate.ok ? 'deflate-raw' : 'unsupported'}`,
-  ].join(' ');
-}
-
-__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, preloadProgress: preloadProgress, loadUiState: loadUiState, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag };
-}());
-(function () {
 // 入口 / 组的视图模型 —— 由 app 状态派生「这组有多少题、什么顺序、空态说什么」
 // （设计档 §2.11.1 / §2.11.5 / §2.11.6）。由 app.mjs 迁出，守 N8 行数纪律；纯读，不改状态。
 
@@ -3066,17 +3227,21 @@ __MODULES__["src/ui/stats.mjs"] = { shouldShowInstallHint: shouldShowInstallHint
 // 会话持久化与诊断字段在 session.mjs；纯逻辑在 core/。
 const { displayText, grade } = __MODULES__["src/core/grade.mjs"];
 const { inflateRaw, probeInflate } = __MODULES__["src/core/inflate.mjs"];
-const { accuracy, addWrong, bumpWrongCount, cursorIndex, ensureProgress, entryMatrix, groupKey, recordAnswer, removeWrong, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
-const { backupProgress, openStore } = __MODULES__["src/core/store.mjs"];
+const { accuracy, addWrong, bumpWrongCount, cursorIndex, ensureProgress, groupKey, recordAnswer, removeWrong, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
+const { openStore } = __MODULES__["src/core/store.mjs"];
+const { adoptBank, loadBank } = __MODULES__["src/ui/bank-load.mjs"];
 const { renderCard } = __MODULES__["src/ui/card.mjs"];
 const { clear } = __MODULES__["src/ui/dom.mjs"];
 const { createImportFlow } = __MODULES__["src/ui/import.mjs"];
-const { loadUiState, loadWrongbook, persistProgress, persistWrongbook, preloadProgress, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
+const { persistProgress, persistWrongbook, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
 const { currentMastery, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
 const { renderEntryMatrix } = __MODULES__["src/ui/stats.mjs"];
 
 /** 答对后停留时长（毫秒）：让用户看清对错再走（§2.11.3）。 */
 const FEEDBACK_HOLD_MS = 600;
+
+/** 背题延迟揭示时长（毫秒）：先给题干与选项原文，到点后补上正确项与答案原文（R24 / §2.11.7②）。 */
+const MEMORIZE_REVEAL_MS = 2000;
 
 /** 挂载界面（打包产物暴露为 window.EXAM_MEMO.mount）。 */
 async function mount(rootEl, options) {
@@ -3098,7 +3263,9 @@ async function mount(rootEl, options) {
     wrong: new Set(),
     wrongCounts: {},
     response: null, feedback: null, essayStage: 'write', essayDraft: '', completed: false,
+    answerShown: false, // 背题延迟揭示（R24）：每题先给题干与选项原文，到点才置位
     feedbackHoldMs: typeof opts.feedbackHoldMs === 'number' ? opts.feedbackHoldMs : FEEDBACK_HOLD_MS,
+    memorizeRevealMs: typeof opts.memorizeRevealMs === 'number' ? opts.memorizeRevealMs : MEMORIZE_REVEAL_MS,
     timers, pendingTimer: null,
     questionIndex: new Map(),
     flow: null, uiState: null, notice: null,
@@ -3111,63 +3278,13 @@ async function mount(rootEl, options) {
   try { app.inflate = await probeInflate(); } catch (err) { app.inflate = { ok: false, reason: errorMessage(err) }; }
   try { app.store = await openStore({}); app.storeInfo = app.store.describe(); } catch (err) { app.storeInfo = { backend: 'memory', persistent: false, degraded: errorMessage(err) }; }
 
-  await loadBank(app, opts);
+  await loadBank(app, opts, render);
   app.readyMs = Math.round(now() - started);
   render(app);
   registerServiceWorker();
   return app;
 }
 
-async function loadBank(app, opts) {
-  let record = null;
-  if (app.store) {
-    try { record = await app.store.loadBank(); } catch (err) { record = null; }
-  }
-  const embedded = opts.bank || globalThis.EXAM_MEMO_BANK || null;
-  const embed = embedded && Array.isArray(embedded.questions) ? embedded : null;
-  // 单文件形态：内嵌题库就是「本次导入」，与已存题库指纹不一致时按换表处理（§2.10.3）
-  const stale = !!(record && embed && embed.bankFingerprint && record.bankFingerprint
-    && embed.bankFingerprint !== record.bankFingerprint);
-
-  if (stale) {
-    app.bank = record; // 让 adoptBank 看到「已存题库」以便比对与备份
-    await adoptBank(app, embed);
-  } else if (record || embed) {
-    app.bank = record || embed;
-    indexQuestions(app);
-    await loadWrongbook(app, false);
-    if (app.store && !record) {
-      try { await app.store.saveBank(embed); } catch (err) { console.error('内置题库写入存储失败', err); }
-    }
-    await preloadProgress(app);
-  }
-  await loadUiState(app);
-}
-
-/** 采用一份题库（导入 / 内嵌）：指纹变了就备份旧进度并如实告知（§2.10.3 / KD-13）。 */
-async function adoptBank(app, record) {
-  const previous = app.bank;
-  const changed = !!(previous && previous.bankFingerprint && record.bankFingerprint
-    && previous.bankFingerprint !== record.bankFingerprint);
-  await loadWrongbook(app, changed);
-  if (changed && app.store) {
-    const groups = entryMatrix().map((entry) => entry.groupKey);
-    const backed = await backupProgress(app.store, groups);
-    app.notice = `题库已变化，进度将按题号重新对齐（旧的 ${backed} 组进度已备份为 progress:<组>@old）。`;
-  }
-  app.bank = record;
-  indexQuestions(app);
-  if (app.store) {
-    try { await app.store.saveBank(record); } catch (err) { console.error('题库保存失败', err); }
-  }
-  await preloadProgress(app);
-  app.view = 'matrix';
-  render(app);
-}
-
-function indexQuestions(app) {
-  app.questionIndex = new Map(((app.bank && app.bank.questions) || []).map((q) => [q.id, q]));
-}
 
 function render(app) {
   const started = now();
@@ -3222,12 +3339,16 @@ function exitGroup(app) {
   render(app);
 }
 
+/** 换题 / 切组的统一复位：清作答态、取消在用排程，背题组再起一次延迟揭示（§2.11.2 / R24）。 */
 function resetQuestionState(app) {
   app.response = null;
   app.feedback = null;
   app.essayStage = 'write';
   app.essayDraft = '';
   app.completed = false;
+  app.answerShown = false; // 每题重新起算（渲染侧 fail-closed：非 true 不显示答案）
+  cancelAdvance(app);
+  scheduleReveal(app);
 }
 
 function currentQuestion(app) {
@@ -3244,7 +3365,7 @@ function renderQuestion(app) {
     index: app.index, total: app.order.length,
     response: app.response, feedback: app.feedback,
     essayStage: app.essayStage, essayDraft: app.essayDraft,
-    completed: app.completed, emptyText: emptyTextFor(app),
+    completed: app.completed, answerShown: app.answerShown, emptyText: emptyTextFor(app),
     accuracy: app.progress ? accuracy(app.progress) : null,
     answeredCount: app.progress ? app.progress.stats.attempts : 0,
     canRemoveWrong: app.group.mode === 'practice' && app.group.type === WRONGBOOK,
@@ -3294,6 +3415,16 @@ function cancelAdvance(app) {
   if (app.pendingTimer === null || app.pendingTimer === undefined) return;
   app.timers.clear(app.pendingTimer);
   app.pendingTimer = null;
+}
+
+/** 背题延迟揭示（R24 / §2.11.7②）：复用 `app.pendingTimer`，换题 / 切组 / 退出都走既有取消路径。 */
+function scheduleReveal(app) {
+  if (!app.group || app.group.mode !== 'memorize') return; // 与练习态无关：不排程、也不白重画一次
+  app.pendingTimer = app.timers.set(() => {
+    app.pendingTimer = null;
+    app.answerShown = true;
+    render(app);
+  }, app.memorizeRevealMs);
 }
 
 function handlePick(app, payload) {
@@ -3436,7 +3567,7 @@ function openImport(app) {
 
 async function bankImported(app, record) {
   app.importMs = app.flow && app.flow.state ? app.flow.state.importMs : app.importMs;
-  await adoptBank(app, record);
+  await adoptBank(app, record, render);
 }
 
 function registerServiceWorker() {
@@ -3457,7 +3588,7 @@ function now() { return globalThis.performance ? globalThis.performance.now() : 
 
 function errorMessage(err) { return err && err.message ? err.message : String(err); }
 
-__MODULES__["src/ui/app.mjs"] = { mount: mount };
+__MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REVEAL_MS };
 }());
-window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount };
+window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());

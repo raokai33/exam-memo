@@ -21,13 +21,17 @@ html, body {
   color: var(--ink);
   font: 17px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   overflow-x: hidden;
+  /* R23：整页抑制双击缩放（含题卡外空白），保留双指缩放；不改 viewport */
+  touch-action: manipulation;
 }
 /* —— 页面骨架 —— */
 .screen {
   max-width: 720px;
   margin: 0 auto;
   padding: calc(16px + env(safe-area-inset-top)) 16px calc(24px + env(safe-area-inset-bottom));
-  /* R22：抑制双击缩放，保留双指缩放（不改 viewport） */
+  /* R25：底栏固定贴底，为内容预留栏高 + 安全区（末尾内容不被底栏遮住） */
+  padding-bottom: calc(104px + env(safe-area-inset-bottom));
+  /* R22 / R23：抑制双击缩放，保留双指缩放（不改 viewport） */
   touch-action: manipulation;
 }
 .app-title, .screen-title {
@@ -333,7 +337,15 @@ html, body {
   color: #7f1d1d;
 }
 .card-footer {
-  margin-top: 16px;
+  /* R25：底栏常驻贴底——固定定位 + 与 .screen 同宽居中（父容器无 transform，包含块即视口） */
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 8px 14px calc(8px + env(safe-area-inset-bottom));
+  background: var(--card);
 }
 .card-foot {
   display: flex;
