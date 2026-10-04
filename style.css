@@ -453,3 +453,98 @@ select, input[type="text"] {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 模拟考试面样式（设计档 §2.11.8 / §2.13.1）：考试顶栏 / 结果清单 / 续考询问。
+   构建拼接源第三位（§2.4.5）：style.css → style-import.css → style-exam.css。 */
+.exam-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0 10px;
+}
+.exam-remaining {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.exam-progress, .exam-assess-title {
+  font-size: 14px;
+  color: var(--muted);
+}
+.exam-top .exam-exit {
+  margin-left: auto;
+  padding: 6px 12px;
+}
+/* 自评收尾：你的作答（原文照录） */
+.exam-my-answer {
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+.exam-block-title {
+  font-size: 13px;
+  color: var(--muted);
+}
+.exam-my-answer-raw {
+  font-size: 16px;
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* 结果页 */
+.exam-score {
+  font-size: 34px;
+  font-weight: 700;
+  margin: 6px 0;
+}
+.exam-accuracy {
+  font-size: 15px;
+  color: var(--muted);
+  margin: 4px 0;
+}
+.exam-list-title {
+  font-size: 17px;
+  margin: 16px 0 6px;
+}
+.exam-list {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+}
+.exam-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 15px;
+}
+.exam-row-index {
+  min-width: 24px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.exam-row-type {
+  min-width: 52px;
+}
+.exam-row-source {
+  flex: 1;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.exam-row-outcome {
+  font-weight: 600;
+}
+.exam-row-outcome.outcome-correct {
+  color: var(--ok);
+}
+.exam-row-outcome.outcome-wrong {
+  color: var(--bad);
+}
+.exam-row-outcome.outcome-blank {
+  color: var(--muted);
+}
+/* 续考询问 */
+.exam-resume {
+  font-size: 15px;
+}

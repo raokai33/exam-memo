@@ -2024,7 +2024,7 @@ function byId(id) {
 __MODULES__["src/ui/dom.mjs"] = { el: el, add: add, clear: clear, byId: byId };
 }());
 (function () {
-// 会话持久化与诊断字段 —— 由 app.mjs 迁出（设计档 §2.4.4 / §2.10.3 / §2.11.6）。
+// 会话持久化 / 诊断字段 / service worker 注册 —— 由 app.mjs 迁出（设计档 §2.4.4 / §2.10.3 / §2.11.6 / §2.12.2）。
 // 只经 app.store 的存储接口读写；界面状态由 app.mjs 持有。
 
 const { SCHEMA_VERSION } = __MODULES__["src/core/bank.mjs"];
@@ -2113,7 +2113,22 @@ function writeDiag(app) {
   ].join(' ');
 }
 
-__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, preloadProgress: preloadProgress, loadUiState: loadUiState, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag };
+/** 注册 service worker（PWA 形态；单文件从 file:// 打开时不注册，§2.12.1）。由 app.mjs 迁出（N8 行数纪律）。 */
+function registerServiceWorker() {
+  const location = globalThis.location;
+  const protocol = location && location.protocol ? location.protocol : '';
+  // 单文件形态从 file:// 打开：不注册 service worker（§2.12.1）
+  if (protocol !== 'http:' && protocol !== 'https:') return;
+  const nav = globalThis.navigator;
+  if (!nav || !('serviceWorker' in nav)) return;
+  try {
+    nav.serviceWorker.register('sw.js').catch((err) => console.error('service worker 注册失败', err));
+  } catch (err) {
+    console.error('service worker 注册失败', err);
+  }
+}
+
+__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, preloadProgress: preloadProgress, loadUiState: loadUiState, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag, registerServiceWorker: registerServiceWorker };
 }());
 (function () {
 // 题库装载（N8 拆分自 app.mjs）：读存储 / 内嵌题库、换表备份与重绘（§2.10.3 / §2.4.2）。
@@ -2269,7 +2284,92 @@ function attachSwipe(el, handlers) {
   };
 }
 
-__MODULES__["src/ui/gesture.mjs"] = { swipeDirection: swipeDirection, attachSwipe: attachSwipe, SWIPE_MIN_PX: SWIPE_MIN_PX, SWIPE_DOMINANCE: SWIPE_DOMINANCE, SWIPE_EDGE_GUARD_PX: SWIPE_EDGE_GUARD_PX };
+// ---------------------------------------------------------------------------
+// R30 双击守卫（§2.11.7⑥ / AC-44）：只拦背景双击、不吞交互控件连击、多指与滑动不卷入、保留双指缩放。
+
+/** 双击间隔上限（毫秒）：两击起点时间差须落在 `(0, DOUBLE_TAP_MS]`。 */
+const DOUBLE_TAP_MS = 350;
+/** 双击起点距离上限（像素，欧氏距离）：超过即非双击。 */
+const DOUBLE_TAP_SLOP_PX = 40;
+/** 单击有效位移上限（像素）：一击内位移超过它即视为滑动，该击作废。 */
+const TAP_MOVE_MAX_PX = 10;
+
+const INTERACTIVE_TAGS = ['BUTTON', 'A', 'INPUT', 'TEXTAREA', 'SELECT', 'LABEL'];
+
+/** 落点是否在交互控件内：沿 `parentNode` 链逐级查 `tagName`（DOM 桩没有 `closest()`，与 `inEditable` 同法）。 */
+function inInteractive(node) {
+  let current = node;
+  while (current) {
+    if (INTERACTIVE_TAGS.indexOf(String(current.tagName || '').toUpperCase()) >= 0) return true;
+    current = current.parentNode;
+  }
+  return false;
+}
+
+/** 一笔事件的时间：优先事件自带 `timeStamp`（合成事件可注入），缺省取挂钟。 */
+function eventTime(event) {
+  return event && typeof event.timeStamp === 'number' ? event.timeStamp : Date.now();
+}
+
+/** 纯判据（AC-44）：两击均非空、间隔在 `(0, DOUBLE_TAP_MS]`、起点欧氏距离 ≤ `DOUBLE_TAP_SLOP_PX` → 双击。 */
+function isDoubleTap(first, second) {
+  if (!first || !second) return false;
+  const gap = second.at - first.at;
+  if (!(gap > 0 && gap <= DOUBLE_TAP_MS)) return false;
+  return Math.hypot(second.x - first.x, second.y - first.y) <= DOUBLE_TAP_SLOP_PX;
+}
+
+/**
+ * 首页双击兜底（R30 / §2.11.7⑥）：单指两击成立且**两击落点均非交互控件**时，第二击 `preventDefault()`
+ * （吞掉系统双击缩放）；交互控件、多指、滑动、超时、超距一律放行——不 `stopPropagation`、
+ * 不改 `viewport`、不动既有 CSS（与 R23 的 CSS 层并存）。返回 `detach()`。
+ */
+function attachDoubleTapGuard(el) {
+  let last = null; // 上一有效单击：{ at, x, y, target }
+  let current = null; // 尚未收尾的一笔的起点
+  let detached = false;
+
+  const onStart = (event) => {
+    if (detached) return;
+    const touches = event ? event.touches : null;
+    if (!touches || touches.length !== 1) { last = null; current = null; return; } // 多指：清状态、不拦
+    const point = firstPoint(event, 'touches');
+    current = point ? { at: eventTime(event), x: point.x, y: point.y, target: event.target } : null;
+  };
+
+  const onEnd = (event) => {
+    if (detached) return;
+    const start = current;
+    current = null;
+    const point = firstPoint(event, 'changedTouches');
+    if (!start || !point) return;
+    if (Math.abs(point.x - start.x) > TAP_MOVE_MAX_PX || Math.abs(point.y - start.y) > TAP_MOVE_MAX_PX) {
+      last = null; // 滑动超限：该击作废，双击序列一并打断
+      return;
+    }
+    const tap = { at: start.at, x: start.x, y: start.y, target: start.target };
+    const first = last;
+    if (!isDoubleTap(first, tap)) { last = tap; return; }
+    last = null; // 双击成立即消费上一击（避免三连击被重复配对）
+    if (!inInteractive(first.target) && !inInteractive(tap.target) && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+  };
+
+  // preventDefault 需要非被动监听：显式声明（部分环境对 touch 监听有被动默认，会让第 ③ 条的抑制无声失效）
+  el.addEventListener('touchstart', onStart, { passive: false });
+  el.addEventListener('touchend', onEnd, { passive: false });
+  return function detach() {
+    detached = true;
+    // DOM 桩没有 removeEventListener：有才调（与 attachSwipe 同法）
+    if (typeof el.removeEventListener === 'function') {
+      el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchend', onEnd);
+    }
+  };
+}
+
+__MODULES__["src/ui/gesture.mjs"] = { swipeDirection: swipeDirection, attachSwipe: attachSwipe, isDoubleTap: isDoubleTap, attachDoubleTapGuard: attachDoubleTapGuard, SWIPE_MIN_PX: SWIPE_MIN_PX, SWIPE_DOMINANCE: SWIPE_DOMINANCE, SWIPE_EDGE_GUARD_PX: SWIPE_EDGE_GUARD_PX, DOUBLE_TAP_MS: DOUBLE_TAP_MS, DOUBLE_TAP_SLOP_PX: DOUBLE_TAP_SLOP_PX, TAP_MOVE_MAX_PX: TAP_MOVE_MAX_PX };
 }());
 (function () {
 // 题卡 —— 背题（§2.11.2 / R13 / R24：延迟揭示）与练习（§2.11.3 / R14 / R15 / R19 / R26）。
@@ -2398,6 +2498,7 @@ function renderPracticeBody(question, view) {
     nodes.push(judgeRow(question, {
       picked: response.judge,
       interactive: !feedback,
+      showAnswer: !!feedback, // F1（§2.11.3「点选即判」）：作答前不得标绿，作答后照常标出正确项
       onPick: (payload) => view.onPick(payload),
     }));
   } else if (question.type === 'fill') {
@@ -2552,7 +2653,537 @@ function judgeClass(picked, value, answerJudge) {
   return classes.join(' ');
 }
 
-__MODULES__["src/ui/card.mjs"] = { renderCard: renderCard };
+__MODULES__["src/ui/card.mjs"] = { renderCard: renderCard, answerBlock: answerBlock, judgeRow: judgeRow, renderOptions: renderOptions };
+}());
+(function () {
+// 模拟考试纯逻辑（设计档 §2.11.8 / §2.4.1 / KD-29–KD-33）：抽题 / 计分 / 剩余时间格式化。
+// 无 DOM、无 IO：random 由调用方传入（§2.4.2 注入缝），因此可完全单测。
+
+const { grade } = __MODULES__["src/core/grade.mjs"];
+
+/** 卷面配比（写死；数组顺序 = 卷面题型顺序）。 */
+const EXAM_PLAN = [['single', 10], ['multi', 5], ['judge', 10], ['fill', 10], ['essay', 4]];
+const EXAM_TOTAL = 39;
+/** 限时 30 分钟（D20）。 */
+const EXAM_DURATION_MS = 1800000;
+const EXAM_TICK_MS = 1000;
+/** `exam:current` 的形状版本（§2.10.3）。 */
+const EXAM_STATE_VERSION = 1;
+/** 抽题池排除的数据标记（D7 不猜：这三类无法可靠判分）。 */
+const EXAM_EXCLUDED_MARKS = ['noAnswer', 'suspect', 'outOfRange'];
+
+/** 某题型的抽题池 = 该题型中 marks 不含排除标记的题（§2.11.8 ①）。 */
+function poolFor(questions, type) {
+  return (questions || []).filter((question) => question.type === type
+    && !EXAM_EXCLUDED_MARKS.some((mark) => (question.marks || []).indexOf(mark) >= 0));
+}
+
+/** 抽题池合计（入口 disabled 判据：合计 0 → 入口禁用，§2.11.8 ②）。 */
+function examPoolTotal(questions) {
+  let total = 0;
+  for (const [type] of EXAM_PLAN) total += poolFor(questions, type).length;
+  return total;
+}
+
+/** 已答判据（§2.11.8 ④，写死）：选择 / 判断有选择；填空至少一空非空（去空白）；简答文本去空白后非空。 */
+function hasAnswer(question, response) {
+  if (!question || !response) return false;
+  if (question.type === 'single') return !!response.letter;
+  if (question.type === 'multi') return Array.isArray(response.letters) && response.letters.length > 0;
+  if (question.type === 'judge') return !!response.judge;
+  if (question.type === 'fill') {
+    return Array.isArray(response.values)
+      && response.values.some((value) => String(value === undefined || value === null ? '' : value).trim() !== '');
+  }
+  if (question.type === 'essay') {
+    return String(response.text === undefined || response.text === null ? '' : response.text).trim() !== '';
+  }
+  return false;
+}
+
+/**
+ * 抽题（§2.11.8 ①，写死）：逐题型做部分 Fisher–Yates 选前 k 题（k = min(配比, 池大小)，k ≥ n 时全取）；
+ * 随机只决定「抽哪些」——卷面顺序恒为 EXAM_PLAN 题型序 → 同题型源表序（AC-40）。
+ */
+function drawExam(questions, random) {
+  const pick = typeof random === 'function' ? random : Math.random;
+  const qids = [];
+  const perType = {};
+  const missing = {};
+  for (const [type, quota] of EXAM_PLAN) {
+    const pool = [];
+    (questions || []).forEach((question, index) => {
+      if (question.type !== type) return;
+      if (EXAM_EXCLUDED_MARKS.some((mark) => (question.marks || []).indexOf(mark) >= 0)) return;
+      pool.push({ id: question.id, index });
+    });
+    const count = Math.min(quota, pool.length);
+    for (let i = 0; i < count; i += 1) {
+      const j = i + Math.floor(pick() * (pool.length - i));
+      const swap = pool[i];
+      pool[i] = pool[j];
+      pool[j] = swap;
+    }
+    const picked = pool.slice(0, count).sort((a, b) => a.index - b.index);
+    perType[type] = picked.length;
+    missing[type] = quota - picked.length;
+    for (const item of picked) qids.push(item.id);
+  }
+  return { qids, perType, missing, total: qids.length };
+}
+
+/**
+ * 计分（§2.11.8 ⑤⑧ / KD-32）：每题 1 分、满分 = 卷面题数；未答 = 'blank'（算错、不调 grade()）；
+ * 简答已答未自评 = 'pending'（不计分；流程保证结果页前收齐）；其余题调 grade()（D4–D6 口径原样）。
+ */
+function scoreExam(questions, paper, answers, selfAssess) {
+  const byId = new Map((questions || []).map((question) => [question.id, question]));
+  const replies = answers || {};
+  const assessed = selfAssess || {};
+  const rows = [];
+  for (const qid of (paper && paper.qids) || []) {
+    const question = byId.get(qid) || null;
+    const response = replies[qid];
+    let outcome;
+    if (!question || !hasAnswer(question, response)) outcome = 'blank';
+    else if (question.type === 'essay') outcome = assessed[qid] === undefined ? 'pending' : (assessed[qid] ? 'correct' : 'wrong');
+    else outcome = grade(question, response).correct ? 'correct' : 'wrong';
+    rows.push({ qid, type: question ? question.type : null, outcome, correct: outcome === 'correct' });
+  }
+  return {
+    rows,
+    score: rows.filter((row) => row.correct).length,
+    total: rows.length,
+    wrong: rows.filter((row) => row.outcome === 'wrong' || row.outcome === 'blank').map((row) => row.qid),
+  };
+}
+
+/**
+ * 已作答的简答（未自评）在卷面的下标——自评收尾的驱动面（§2.11.8 ⑥）。
+ * 空数组 = 无待自评（可直接出结果页）。
+ */
+function pendingEssayIndexes(questions, paper, answers, selfAssess) {
+  const byId = new Map((questions || []).map((question) => [question.id, question]));
+  const replies = answers || {};
+  const assessed = selfAssess || {};
+  const pending = [];
+  for (const qid of (paper && paper.qids) || []) {
+    const question = byId.get(qid);
+    if (!question || question.type !== 'essay') continue;
+    if (!hasAnswer(question, replies[qid]) || assessed[qid] !== undefined) continue;
+    pending.push(paper.qids.indexOf(qid));
+  }
+  return pending;
+}
+
+/** 顶栏剩余时间（MM:SS；≤ 0 → 00:00）。 */
+function formatRemaining(ms) {
+  const seconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const mm = Math.floor(seconds / 60);
+  const ss = seconds % 60;
+  return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+}
+
+__MODULES__["src/core/exam.mjs"] = { poolFor: poolFor, examPoolTotal: examPoolTotal, hasAnswer: hasAnswer, drawExam: drawExam, scoreExam: scoreExam, pendingEssayIndexes: pendingEssayIndexes, formatRemaining: formatRemaining, EXAM_PLAN: EXAM_PLAN, EXAM_TOTAL: EXAM_TOTAL, EXAM_DURATION_MS: EXAM_DURATION_MS, EXAM_TICK_MS: EXAM_TICK_MS, EXAM_STATE_VERSION: EXAM_STATE_VERSION, EXAM_EXCLUDED_MARKS: EXAM_EXCLUDED_MARKS };
+}());
+(function () {
+// 模拟考试流程控制器与渲染（设计档 §2.11.8 / KD-29–KD-33 / §2.13.1）：抽题与计分在 core/exam.mjs，
+// 题目部件复用 card.mjs 的导出；注入 app.timers / app.nowMs / app.random（测试可确定性推进）。
+const { blankCountOf } = __MODULES__["src/core/answers.mjs"];
+const { TYPE_LABELS } = __MODULES__["src/core/detect.mjs"];
+const { drawExam, EXAM_DURATION_MS, EXAM_PLAN, EXAM_STATE_VERSION, EXAM_TICK_MS, EXAM_TOTAL, formatRemaining, hasAnswer, pendingEssayIndexes, scoreExam } = __MODULES__["src/core/exam.mjs"];
+const { answerBlock, judgeRow, renderOptions } = __MODULES__["src/ui/card.mjs"];
+const { TYPE_LABELS: SHORT_TYPE_LABELS } = __MODULES__["src/core/progress.mjs"];
+const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
+
+const EXAM_KEY = 'exam:current';
+const OUTCOME_LABELS = { correct: '答对', wrong: '答错', blank: '未答', pending: '未评' };
+function btn(className, text, onClick, extra) {
+  return el('button', Object.assign({ class: `btn ${className}`, type: 'button', text, on: { click: onClick } }, extra || {}));
+}
+function span(className, text) { return el('span', { class: className, text }); }
+
+/** 打开考试面（app.mjs 的接线入口）：先给 loading 屏，读完 `exam:current` 再定屏。 */
+async function openExam(app, render) {
+  const flow = createExamFlow({ app, render });
+  app.exam = flow;
+  app.view = 'exam';
+  render(app);
+  let record = null;
+  if (app.store) { try { record = await app.store.loadKey(EXAM_KEY); } catch (err) { console.error('考试状态读取失败', err); } }
+  const valid = record && record.version === EXAM_STATE_VERSION && Array.isArray(record.qids)
+    && record.qids.length > 0 && record.qids.every((qid) => app.questionIndex.has(qid));
+  if (valid) { flow.state.saved = record; flow.state.phase = 'ask'; return render(app); }
+  if (record) { clearRecord(app); flow.state.notice = '题库已变化，上次考试已作废'; } // 换表兜底（§2.11.8 ⑦）
+  startExam(app, flow);
+  render(app);
+}
+
+/** 一次考试流程的完整控制器（状态 + 操作面；渲染入口 = flow.render(root)）。 */
+function createExamFlow(options) {
+  const app = options.app;
+  const render = options.render;
+  const state = {
+    phase: 'loading', paper: null, answers: {}, selfAssess: {}, index: 0, startedAt: 0, deadline: 0,
+    assessIndex: 0, saved: null, tick: null, confirm: false, notice: null, saveError: false,
+  };
+  const flow = { state, liveInputs: [], refs: {} };
+  Object.assign(flow, {
+    render: (root) => renderExam(root, app, flow),
+    startNew: () => { startExam(app, flow); refresh(app, flow); }, // 重新开始 / 再考一次
+    continueSaved: () => resumeSaved(app, flow),
+    pick: (payload) => pickAnswer(app, flow, payload),
+    prev: () => moveCursor(app, flow, -1),
+    next: () => moveCursor(app, flow, 1),
+    exit: () => exitExam(app, flow, render, true), // 退出：落盘 + 「已保存」提示
+    home: () => exitExam(app, flow, render, false), // 结果页 / 空态返回
+    askSubmit: () => { state.confirm = true; refresh(app, flow); }, // 交卷两步确认（§2.11.8 ⑤）
+    cancelSubmit: () => { state.confirm = false; refresh(app, flow); },
+    confirmSubmit: () => submitExam(app, flow),
+    assess: (correct) => assessEssay(app, flow, correct),
+  });
+  flow.retry = flow.startNew;
+  return flow;
+}
+
+/** 抽题开考（新的一卷）：配比走 EXAM_PLAN；池空 → 空态（不白屏）。 */
+function startExam(app, flow) {
+  const state = flow.state;
+  const paper = drawExam((app.bank && app.bank.questions) || [], app.random);
+  const startedAt = app.nowMs();
+  Object.assign(state, {
+    paper: { qids: paper.qids, total: paper.total }, saved: null, answers: {}, selfAssess: {}, index: 0,
+    assessIndex: 0, confirm: false, saveError: false, startedAt, deadline: startedAt + EXAM_DURATION_MS,
+  });
+  stopTick(app, state);
+  if (paper.total === 0) { state.phase = 'empty'; clearRecord(app); return; } // 极端空卷 → 空态 + 返回入口
+  state.phase = 'answering';
+  scheduleTick(app, flow);
+  persistExam(app, flow);
+}
+
+/** 续考（「继续考试」）：剩余按墙钟；到点即按自动交卷处理；自评断点顺延（§2.11.8 ⑦）。 */
+function resumeSaved(app, flow) {
+  const state = flow.state;
+  const record = state.saved;
+  Object.assign(state, {
+    saved: null, paper: { qids: record.qids.slice(), total: record.qids.length },
+    answers: Object.assign({}, record.answers || {}),
+    selfAssess: Object.assign({}, record.selfAssess || {}), // 旧记录无此字段 → 缺省 {}（版本兼容）
+    index: Math.min(Math.max(0, Number(record.index) || 0), Math.max(0, record.qids.length - 1)),
+    startedAt: Number(record.startedAt) || 0, deadline: Number(record.deadline) || 0, confirm: false, saveError: false,
+  });
+  stopTick(app, state);
+  if (record.phase === 'assess') {
+    const pending = pendingEssays(app, state);
+    if (pending.length === 0) { finishExam(app, flow); return; }
+    state.phase = 'assess';
+    state.assessIndex = pending[0];
+    return refresh(app, flow);
+  }
+  state.phase = 'answering';
+  if (state.deadline - app.nowMs() <= 0) { submitExam(app, flow); return; } // 已到点：按时间到自动交卷
+  scheduleTick(app, flow);
+  refresh(app, flow);
+}
+function moveCursor(app, flow, delta) {
+  const state = flow.state;
+  if (state.phase !== 'answering') return;
+  collectCurrent(app, flow);
+  const next = state.index + delta;
+  if (next < 0 || next >= state.paper.total) return;
+  state.index = next;
+  state.confirm = false;
+  refresh(app, flow);
+  persistExam(app, flow); // 每次换题
+}
+function pickAnswer(app, flow, payload) {
+  const state = flow.state;
+  const question = state.phase === 'answering' ? currentQuestion(app, flow, state.index) : null;
+  if (!question) return;
+  const current = state.answers[question.id] || {};
+  const letters = Array.isArray(current.letters) ? current.letters : [];
+  const toggled = letters.indexOf(payload.letter) >= 0
+    ? letters.filter((letter) => letter !== payload.letter) : letters.concat([payload.letter]);
+  // 单选 { letter } / 判断 { judge }；多选 { letters }——作答可改可重答（§2.11.8 ④）
+  const next = question.type === 'multi' ? { letters: toggled.slice().sort() } : Object.assign({}, payload);
+  state.answers = Object.assign({}, state.answers, { [question.id]: next });
+  refresh(app, flow); // 考试中不给实时对错：只重画选择态
+  persistExam(app, flow); // 每次作答变更
+}
+/** 收集当前题的文本输入（填空 / 简答）：换题、交卷、退出、写入前沿同一路径收口。
+ *  只在「当前渲染的输入属于当前题」时才收（换题后旧输入未重画前不得写进新题）。 */
+function collectCurrent(app, flow) {
+  const state = flow.state;
+  const question = currentQuestion(app, flow, state.index);
+  if (!question || flow.liveQid !== question.id || flow.liveInputs.length === 0) return;
+  const value = question.type === 'fill'
+    ? { values: flow.liveInputs.map((input) => input.value) }
+    : question.type === 'essay' ? { text: flow.liveInputs[0].value } : null;
+  if (value) state.answers = Object.assign({}, state.answers, { [question.id]: value });
+}
+function currentQuestion(app, flow, index) {
+  const qid = flow.state.paper ? flow.state.paper.qids[index] : null;
+  return qid ? app.questionIndex.get(qid) || null : null;
+}
+/** 已作答的简答（未自评）在卷面的下标——自评收尾的驱动面（§2.11.8 ⑥）。 */
+function pendingEssays(app, state) {
+  return pendingEssayIndexes((app.bank && app.bank.questions) || [], state.paper, state.answers, state.selfAssess);
+}
+function submitExam(app, flow) {
+  const state = flow.state;
+  if (state.phase !== 'answering') return;
+  collectCurrent(app, flow); // ① 收集当前题输入（正在填空 / 简答也不例外）
+  stopTick(app, state); // ② 停表
+  state.confirm = false;
+  const pending = pendingEssays(app, state); // ③ 判分在 scoreExam（纯函数，结果页取用）
+  if (pending.length === 0) { finishExam(app, flow); return; } // ⑤ 无简答待自评 → 结果页
+  // ④ 有「已作答的简答」→ 自评收尾（未作答的简答不进自评，直接算未答）
+  state.phase = 'assess';
+  state.assessIndex = pending[0];
+  refresh(app, flow);
+  persistExam(app, flow); // 进入自评断点
+}
+function assessEssay(app, flow, correct) {
+  const state = flow.state;
+  const question = state.phase === 'assess' ? currentQuestion(app, flow, state.assessIndex) : null;
+  if (!question) return;
+  // 会了记对 / 不会记错，各计一次、不可回退（与 R19 同口径）
+  state.selfAssess = Object.assign({}, state.selfAssess, { [question.id]: !!correct });
+  const pending = pendingEssays(app, state);
+  if (pending.length === 0) { finishExam(app, flow); return; } // 自评收齐 → 结果页
+  state.assessIndex = pending[0];
+  refresh(app, flow);
+  persistExam(app, flow);
+}
+function finishExam(app, flow) {
+  flow.state.phase = 'result';
+  stopTick(app, flow.state);
+  clearRecord(app); // 交卷完成 → 清 exam:current（结果不持久化，§2.11.8 ⑦⑧）
+  refresh(app, flow);
+}
+/** 离开考试面：退出（save=true：落盘 + 「已保存」提示）/ 结果页与空态返回首页（save=false）。 */
+function exitExam(app, flow, render, save) {
+  const state = flow.state;
+  collectCurrent(app, flow);
+  if (save && (state.phase === 'answering' || state.phase === 'assess')) {
+    persistExam(app, flow); // 退出前落盘——页面被关闭 / 刷新同理（状态已在存储里）
+    app.notice = '本次考试已保存，可稍后继续';
+  }
+  stopTick(app, state);
+  app.exam = null;
+  app.view = 'matrix';
+  render(app);
+}
+
+// —— 计时（tick 单排程 + 墙钟剩余；§2.11.8 ③） ——
+function scheduleTick(app, flow) {
+  const state = flow.state;
+  stopTick(app, state);
+  state.tick = app.timers.set(() => {
+    state.tick = null;
+    if (state.phase !== 'answering') return; // 交卷 / 退出后不再走
+    if (state.deadline - app.nowMs() <= 0) { submitExam(app, flow); return; } // 到点自动交卷（D20）
+    updateBars(app, flow);
+    scheduleTick(app, flow); // 重排下一个
+  }, EXAM_TICK_MS);
+}
+function stopTick(app, state) {
+  if (state.tick === null || state.tick === undefined) return;
+  app.timers.clear(state.tick);
+  state.tick = null;
+}
+/** 顶栏就地刷新（不整体重画——避免打断正在输入的填空 / 简答）。 */
+function updateBars(app, flow) {
+  const state = flow.state;
+  if (!state.paper) return;
+  let answered = 0;
+  for (const qid of state.paper.qids) if (hasAnswer(app.questionIndex.get(qid), state.answers[qid])) answered += 1;
+  if (flow.refs.remaining) flow.refs.remaining.textContent = `剩余 ${formatRemaining(state.deadline - app.nowMs())}`;
+  if (flow.refs.progress) flow.refs.progress.textContent = `第 ${state.index + 1} / ${state.paper.total} 题 · 已答 ${answered} / ${state.paper.total}`;
+}
+
+// —— 持久化（exam:current 是考试唯一的写入面，§2.11.8 ⑨ / KD-31） ——
+function persistExam(app, flow) {
+  const state = flow.state;
+  if (!app.store || !state.paper || (state.phase !== 'answering' && state.phase !== 'assess')) return;
+  app.store.saveKey(EXAM_KEY, {
+    version: EXAM_STATE_VERSION, qids: state.paper.qids.slice(), answers: Object.assign({}, state.answers),
+    index: state.index, startedAt: state.startedAt, deadline: state.deadline, phase: state.phase,
+    assessIndex: state.assessIndex, selfAssess: Object.assign({}, state.selfAssess),
+  }).catch((err) => {
+    console.error('考试进度保存失败', err);
+    state.saveError = true;
+    refresh(app, flow); // 顶部提示「本次进度可能未保存」（写入失败不吞）
+  });
+}
+function clearRecord(app) {
+  if (!app.store) return;
+  app.store.saveKey(EXAM_KEY, null).catch((err) => console.error('考试状态清除失败', err));
+}
+/** 重画前先收集当前题的文本输入（liveInputs 属于刚渲染的那棵树）。 */
+function refresh(app, flow) {
+  collectCurrent(app, flow);
+  flow.render(app.root);
+}
+
+// —— 渲染 ——
+function renderExam(root, app, flow) {
+  const state = flow.state;
+  flow.liveInputs = [];
+  flow.liveQid = null;
+  flow.refs = {};
+  clear(root);
+  let nodes;
+  if (state.phase === 'loading') nodes = [el('p', { class: 'empty', text: '正在准备考试…' })];
+  else if (state.phase === 'ask') nodes = resumePage(app, flow);
+  else if (state.phase === 'empty') nodes = [el('p', { class: 'empty exam-empty', text: '没有可用题目' }), el('div', { class: 'actions' }, [btn('exam-home', '返回入口', () => flow.home())])];
+  else if (state.phase === 'assess') nodes = assessPage(app, flow);
+  else if (state.phase === 'answering') nodes = answeringPage(app, flow);
+  else nodes = resultPage(app, flow);
+  const screen = el('main', { class: 'screen exam-screen' });
+  for (const node of nodes) screen.appendChild(node);
+  add(root, screen);
+}
+/** 续考询问页（§2.11.8 ⑦）：继续考试 / 重新开始（放弃上次）。 */
+function resumePage(app, flow) {
+  const record = flow.state.saved;
+  const remained = Math.max(0, record.deadline - app.nowMs());
+  const answered = record.qids.filter((qid) => hasAnswer(app.questionIndex.get(qid), (record.answers || {})[qid])).length;
+  const info = `上次考试进行中 · 剩余 ${Math.ceil(remained / 60000)} 分钟 · 已答 ${answered} / ${record.qids.length}`;
+  const actions = el('div', { class: 'actions' }, [
+    btn('btn-primary exam-resume-continue', '继续考试', () => flow.continueSaved()),
+    btn('exam-resume-restart', '重新开始（放弃上次）', () => flow.startNew()),
+  ]);
+  return [el('h1', { class: 'app-title', text: '模拟考试' }), el('p', { class: 'banner banner-warn exam-resume', text: info }), actions];
+}
+
+function answeringPage(app, flow) {
+  const state = flow.state;
+  const question = currentQuestion(app, flow, state.index);
+  flow.refs.remaining = span('exam-remaining', '');
+  flow.refs.progress = span('exam-progress', '');
+  const nodes = [el('header', { class: 'exam-top' }, [flow.refs.remaining, flow.refs.progress, btn('btn-ghost exam-exit', '退出', () => flow.exit())])];
+  if (state.notice) nodes.push(el('p', { class: 'banner banner-warn exam-notice', text: state.notice }));
+  if (state.saveError) nodes.push(el('p', { class: 'banner banner-warn exam-save-warn', text: '本次进度可能未保存' }));
+  if (state.paper.total < EXAM_TOTAL) nodes.push(el('p', { class: 'banner banner-warn exam-note', text: shortfallText(app, state) }));
+  nodes.push(questionCard(question, questionZone(app, flow, question)));
+  nodes.push(el('div', { class: 'card-footer exam-footer' }, [footer(app, flow)]));
+  updateBars(app, flow); // 首屏即显剩余 / 已答
+  return nodes;
+}
+/** 题库不足提示条（§2.11.8 ②）：本卷 X 题（标准 39 题）+ 逐题型缺额（缺额为 0 的不列）。 */
+function shortfallText(app, state) {
+  const counts = {};
+  for (const qid of state.paper.qids) {
+    const question = app.questionIndex.get(qid);
+    if (question) counts[question.type] = (counts[question.type] || 0) + 1;
+  }
+  const parts = EXAM_PLAN
+    .filter(([type, quota]) => (counts[type] || 0) < quota)
+    .map(([type, quota]) => `${SHORT_TYPE_LABELS[type] || type}缺 ${quota - (counts[type] || 0)}`);
+  return `题库不足：本卷 ${state.paper.total} 题（标准 ${EXAM_TOTAL} 题）· ${parts.join(' / ')}`;
+}
+/** 题卡骨架（作答页与自评页共用）：来源题号 + 题型 + 题干 + 部件。 */
+function questionCard(question, zone) {
+  const meta = el('div', { class: 'card-meta' }, [span('source-row', question.sourceRow), span('chip chip-type', TYPE_LABELS[question.type] || question.type)]);
+  const body = el('section', { class: 'card-body' }, [el('p', { class: 'stem', text: question.stem }), el('div', { class: 'answer-zone' }, zone)]);
+  return el('article', { class: 'card exam-card' }, [el('div', { class: 'card-head' }, [meta]), body]);
+}
+
+function footer(app, flow) {
+  const state = flow.state;
+  const foot = el('div', { class: 'card-foot' });
+  if (state.confirm) {
+    // 主动交卷 = 两步就地确认；到点自动交卷不经确认
+    foot.appendChild(btn('btn-primary exam-confirm-submit', '确认交卷', () => flow.confirmSubmit()));
+    foot.appendChild(btn('exam-confirm-cancel', '继续答题', () => flow.cancelSubmit()));
+    return foot;
+  }
+  foot.appendChild(btn('exam-prev', '上一题', () => flow.prev(), { disabled: state.index <= 0 }));
+  foot.appendChild(btn('exam-next', '下一题', () => flow.next(), { disabled: state.index >= state.paper.total - 1 }));
+  foot.appendChild(btn('btn-primary exam-submit', '交卷', () => flow.askSubmit()));
+  return foot;
+}
+/** 作答部件（无判定性信息：不传 showCorrect / showAnswer——§2.11.8 ④ / KD-30）。 */
+function questionZone(app, flow, question) {
+  const response = flow.state.answers[question.id] || {};
+  const onPick = (payload) => flow.pick(payload);
+  if (question.type === 'single' || question.type === 'multi') return [renderOptions(question, { response, onPick }, { interactive: true, showCorrect: false })];
+  if (question.type === 'judge') return [judgeRow(question, { picked: response.judge, interactive: true, onPick, showAnswer: false })];
+  return textZone(app, flow, question, response);
+}
+/** 填空 / 简答：输入即记录；输入事件就地刷新顶栏，不整体重画（不打断打字）。 */
+function textZone(app, flow, question, response) {
+  flow.liveQid = question.id; // 本棵树的输入归属该题（收集判据）
+  const bind = (node) => {
+    node.addEventListener('input', () => { collectCurrent(app, flow); persistExam(app, flow); updateBars(app, flow); });
+    flow.liveInputs.push(node);
+    return node;
+  };
+  if (question.type === 'fill') {
+    const blanks = Math.max(1, blankCountOf(question.stem) || question.answer.blanks || 1);
+    const values = Array.isArray(response.values) ? response.values : [];
+    const nodes = [];
+    for (let i = 0; i < blanks; i += 1) {
+      const input = bind(el('input', { class: 'blank-input', type: 'text', inputmode: 'text', placeholder: `第 ${i + 1} 空` }));
+      input.value = values[i] || '';
+      nodes.push(el('label', { class: 'blank-row' }, [span('blank-index', `第 ${i + 1} 空`), input]));
+    }
+    return nodes;
+  }
+  const area = bind(el('textarea', { class: 'essay-input', rows: '4' }));
+  area.value = response.text || '';
+  return [area];
+}
+/** 自评收尾（§2.11.8 ⑥）：你的作答 + 参考答案原文 + 会了 / 不会（各计一次、不可回退）。 */
+function assessPage(app, flow) {
+  const state = flow.state;
+  const question = currentQuestion(app, flow, state.assessIndex);
+  const response = state.answers[question.id] || {};
+  const total = pendingEssays(app, state).length + Object.keys(state.selfAssess).length;
+  const mine = el('div', { class: 'exam-my-answer' }, [
+    el('div', { class: 'exam-block-title', text: '你的作答' }),
+    el('p', { class: 'exam-my-answer-raw', text: String(response.text || '') }),
+  ]);
+  const assess = el('div', { class: 'self-assess' }, [
+    btn('btn-primary assess-yes exam-assess-yes', '会了', () => flow.assess(true)),
+    btn('assess-no exam-assess-no', '不会', () => flow.assess(false)),
+  ]);
+  const head = el('header', { class: 'exam-top' }, [
+    span('exam-assess-title', `交卷完成 · 简答自评 ${Object.keys(state.selfAssess).length} / ${total}`),
+    btn('btn-ghost exam-exit', '退出', () => flow.exit()),
+  ]);
+  return [head, questionCard(question, [mine, answerBlock(question), assess])];
+}
+/** 结果页（§2.11.8 ⑧）：总分 + 正确率 + 逐题对错 + 错题清单 + 再考一次 / 返回首页。 */
+function resultPage(app, flow) {
+  const state = flow.state;
+  const result = scoreExam((app.bank && app.bank.questions) || [], state.paper, state.answers, state.selfAssess);
+  const percent = result.total > 0 ? Math.round((result.score / result.total) * 100) : 0;
+  const wrongRows = result.rows.filter((row) => row.outcome === 'wrong' || row.outcome === 'blank');
+  const list = el('ol', { class: 'exam-list exam-result-list' }, result.rows.map((row, index) => resultRow(app, row, index)));
+  const wrongList = wrongRows.length > 0
+    ? el('ol', { class: 'exam-list exam-wrong-list' }, wrongRows.map((row) => resultRow(app, row, result.rows.indexOf(row))))
+    : el('p', { class: 'empty exam-no-wrong', text: '本次没有错题' });
+  const actions = el('div', { class: 'actions' }, [btn('btn-primary exam-retry', '再考一次', () => flow.retry()), btn('exam-home', '返回首页', () => flow.home())]);
+  return [
+    el('h1', { class: 'app-title', text: '考试结果' }), el('p', { class: 'exam-score', text: `得分 ${result.score} / ${result.total}` }),
+    el('p', { class: 'exam-accuracy', text: `正确率 ${percent}%` }), el('h2', { class: 'exam-list-title', text: '逐题对错' }), list,
+    el('h2', { class: 'exam-list-title', text: '错题清单' }), wrongList, actions,
+  ];
+}
+function resultRow(app, row, index) {
+  const question = app.questionIndex.get(row.qid);
+  return el('li', { class: `exam-row exam-row-${row.outcome}` }, [
+    span('exam-row-index', `${index + 1}`),
+    span('exam-row-type', question ? (TYPE_LABELS[question.type] || question.type) : ''),
+    span('exam-row-source', question ? question.sourceRow : row.qid),
+    span(`exam-row-outcome outcome-${row.outcome}`, OUTCOME_LABELS[row.outcome] || row.outcome),
+  ]);
+}
+
+__MODULES__["src/ui/exam.mjs"] = { openExam: openExam, createExamFlow: createExamFlow };
 }());
 (function () {
 // 导入流程与列映射确认页（设计档 §2.6.5 / §2.11.5 / §2.12.1）。
@@ -3029,6 +3660,7 @@ __MODULES__["src/ui/groups.mjs"] = { uiFlag: uiFlag, seedOf: seedOf, currentMast
 // 入口矩阵与统计（设计档 §2.11.1 / §2.11.6：14 个入口 + 掌握度 meta + 两个开关）。
 // R6 / R8 / R9 / R16 / R18 / R20。
 
+const { EXAM_DURATION_MS, EXAM_TOTAL, examPoolTotal } = __MODULES__["src/core/exam.mjs"];
 const { isCollection, MEMORIZE_TYPES, MODE_LABELS, NUMBERS, PRACTICE_TYPES, TYPE_LABELS, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
 const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
 
@@ -3108,7 +3740,9 @@ function renderEntryMatrix(container, view) {
     return;
   }
 
-  for (const mode of ['memorize', 'practice']) {
+  // R27 / R29（§2.11.1 / KD-27）：区块顺序 = 练习区 → 模拟考试 → 背题区；
+  // 「模拟考试」为独立区块，不计入 14 个入口（§2.11.8 入口与位次）。
+  for (const mode of ['practice', 'memorize']) {
     const group = el('section', { class: 'matrix-group', dataset: { mode } });
     group.appendChild(el('h2', { class: 'matrix-title', text: `${MODE_LABELS[mode]}　` }));
     group.appendChild(el('p', { class: 'matrix-hint', text: MODE_HINTS[mode] }));
@@ -3126,6 +3760,7 @@ function renderEntryMatrix(container, view) {
     // 掌握度开关与两个集合型入口只挂在练习区（§2.11.1 / §2.11.4）
     if (mode === 'practice') group.appendChild(renderPracticeExtras(view));
     screen.appendChild(group);
+    if (mode === 'practice') screen.appendChild(renderExamBlock(view)); // 练习区 → 模拟考试 → 背题区
   }
 
   screen.appendChild(el('div', { class: 'actions' }, [
@@ -3138,6 +3773,28 @@ function renderEntryMatrix(container, view) {
   ]));
 
   add(container, screen);
+}
+
+/**
+ * 「模拟考试」独立区块（R29 / §2.11.8）：按钮类 `exam-entry`——**不带** `.entry` 类，
+ * 14 个入口的计数断面与各条口径不变；抽题池合计 0（无题库 / 全被标记）时禁用。
+ */
+function renderExamBlock(view) {
+  const questions = (view.bank && view.bank.questions) || [];
+  return el('section', { class: 'matrix-group exam-block', dataset: { mode: 'exam' } }, [
+    el('h2', { class: 'matrix-title', text: '模拟考试' }),
+    el('p', { class: 'matrix-hint', text: '按题型抽题成卷，限时作答；交卷后给总分、逐题对错与错题清单。' }),
+    el('button', {
+      class: 'btn exam-entry',
+      type: 'button',
+      dataset: { examEntry: 'true' },
+      disabled: examPoolTotal(questions) === 0,
+      on: { click: () => view.onOpenExam() },
+    }, [
+      el('span', { class: 'entry-label', text: '开始考试' }),
+      el('span', { class: 'entry-meta', text: `${EXAM_TOTAL} 题 · ${EXAM_DURATION_MS / 60000} 分钟` }),
+    ]),
+  ]);
 }
 
 /** 练习区附加区：两个开关 + 错题本（含清空已掌握）+ 数字专项。 */
@@ -3232,8 +3889,10 @@ const { openStore } = __MODULES__["src/core/store.mjs"];
 const { adoptBank, loadBank } = __MODULES__["src/ui/bank-load.mjs"];
 const { renderCard } = __MODULES__["src/ui/card.mjs"];
 const { clear } = __MODULES__["src/ui/dom.mjs"];
+const { attachDoubleTapGuard } = __MODULES__["src/ui/gesture.mjs"];
+const { openExam } = __MODULES__["src/ui/exam.mjs"];
 const { createImportFlow } = __MODULES__["src/ui/import.mjs"];
-const { persistProgress, persistWrongbook, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
+const { persistProgress, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
 const { currentMastery, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
 const { renderEntryMatrix } = __MODULES__["src/ui/stats.mjs"];
 
@@ -3267,13 +3926,17 @@ async function mount(rootEl, options) {
     feedbackHoldMs: typeof opts.feedbackHoldMs === 'number' ? opts.feedbackHoldMs : FEEDBACK_HOLD_MS,
     memorizeRevealMs: typeof opts.memorizeRevealMs === 'number' ? opts.memorizeRevealMs : MEMORIZE_REVEAL_MS,
     timers, pendingTimer: null,
+    nowMs: typeof opts.now === 'function' ? opts.now : Date.now, // 考试计时注入缝（§2.4.2）
+    random: typeof opts.random === 'function' ? opts.random : Math.random, // 考试抽题注入缝
     questionIndex: new Map(),
-    flow: null, uiState: null, notice: null,
+    flow: null, exam: null, uiState: null, notice: null,
     importMs: 0, renderMs: 0, readyMs: 0,
   };
 
   writeDiag(app);
   clear(rootEl);
+  // R30：首页双击兜底挂到挂载根一次（§2.11.7⑥）——覆盖首页与题卡全部背景，不逐屏挂、不在渲染里重挂
+  attachDoubleTapGuard(rootEl);
 
   try { app.inflate = await probeInflate(); } catch (err) { app.inflate = { ok: false, reason: errorMessage(err) }; }
   try { app.store = await openStore({}); app.storeInfo = app.store.describe(); } catch (err) { app.storeInfo = { backend: 'memory', persistent: false, degraded: errorMessage(err) }; }
@@ -3289,6 +3952,7 @@ async function mount(rootEl, options) {
 function render(app) {
   const started = now();
   if (app.view === 'import' && app.flow) app.flow.render(app.root);
+  else if (app.view === 'exam' && app.exam) app.exam.render(app.root); // R29：考试面渲染分支
   else if (app.view === 'card' && app.bank) renderQuestion(app);
   else renderMatrix(app);
   app.renderMs = Math.round(now() - started);
@@ -3304,6 +3968,7 @@ function renderMatrix(app) {
     summaryOf: (mode, type) => groupSummary(app, mode, type),
     onEnter: (mode, type) => enterGroup(app, mode, type),
     onImport: () => openImport(app),
+    onOpenExam: () => { openExam(app, render); }, // R29：模拟考试入口（§2.11.8）
     onClearMastered: () => clearMastered(app),
     onToggleUnmasteredOnly: () => toggleUnmasteredOnly(app),
     onToggleShuffled: () => toggleShuffled(app),
@@ -3348,7 +4013,23 @@ function resetQuestionState(app) {
   app.completed = false;
   app.answerShown = false; // 每题重新起算（渲染侧 fail-closed：非 true 不显示答案）
   cancelAdvance(app);
+  restoreAnsweredState(app); // R28：游标落在本组已作答题 → 重建已作答外观（只读、零副作用）
   scheduleReveal(app);
+}
+
+/**
+ * R28（§2.11.3 第 12 条）：本组 `progress.response` 有该题 → 回看态（对错横幅 + 答案原文；
+ * 简答 = 自评结果 + 参考答案原文）。只读——不写 `response` / `stats` / 错题本、不排程自动前进；
+ * 未作答过（键缺）保持未作答态（fail-closed）；判据面 = 本组，不跨组借答案。
+ */
+function restoreAnsweredState(app) {
+  if (!app.progress || !app.group || app.group.mode !== 'practice') return;
+  const question = currentQuestion(app);
+  if (!question) return;
+  const response = app.progress.response;
+  if (!response || !Object.prototype.hasOwnProperty.call(response, question.id)) return;
+  app.feedback = { correct: response[question.id] === true, expectedDisplay: displayText(question) };
+  if (question.type === 'essay') app.essayStage = 'done';
 }
 
 function currentQuestion(app) {
@@ -3568,20 +4249,6 @@ function openImport(app) {
 async function bankImported(app, record) {
   app.importMs = app.flow && app.flow.state ? app.flow.state.importMs : app.importMs;
   await adoptBank(app, record, render);
-}
-
-function registerServiceWorker() {
-  const location = globalThis.location;
-  const protocol = location && location.protocol ? location.protocol : '';
-  // 单文件形态从 file:// 打开：不注册 service worker（§2.12.1）
-  if (protocol !== 'http:' && protocol !== 'https:') return;
-  const nav = globalThis.navigator;
-  if (!nav || !('serviceWorker' in nav)) return;
-  try {
-    nav.serviceWorker.register('sw.js').catch((err) => console.error('service worker 注册失败', err));
-  } catch (err) {
-    console.error('service worker 注册失败', err);
-  }
 }
 
 function now() { return globalThis.performance ? globalThis.performance.now() : Date.now(); }
