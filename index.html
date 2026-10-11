@@ -11,6 +11,19 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icon-180.png">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <script>
+    // R31 / R32 首帧套用（设计档 §2.19 A）：在样式表之前定档，防「先小后跳」。
+    // 仅当存在合法的用户选择（localStorage['exam-memo-font'] = '0'/'1'/'2'）才写 data-font；
+    // 无选择时不写 —— 根字号走基准档（宽屏的默认「大」由 CSS 媒体查询给出）。
+    (function () {
+      try {
+        var level = window.localStorage.getItem('exam-memo-font');
+        if (level === '0' || level === '1' || level === '2') {
+          document.documentElement.setAttribute('data-font', level);
+        }
+      } catch (err) { /* 存储不可用：保持基准档，不阻断页面 */ }
+    }());
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>

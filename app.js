@@ -2656,6 +2656,72 @@ function judgeClass(picked, value, answerJudge) {
 __MODULES__["src/ui/card.mjs"] = { renderCard: renderCard, answerBlock: answerBlock, judgeRow: judgeRow, renderOptions: renderOptions };
 }());
 (function () {
+// 字号三档与宽屏判定（设计档 §2.19 / R31 / R32）。
+// 档位的 px 值只在 CSS（单一真源，`src/ui/style.css` 的 `html` 规则）；本模块只管索引读写、循环与当前档判定。
+// 口径与首帧内联脚本（index.html / build.mjs 的 FONT_BOOT_SCRIPT）一致：有合法索引才写 `data-font`。
+
+/** 档位索引的存储键（原始字符串 '0'/'1'/'2'，非 JSON；首帧脚本在任何存储探测之前就要读它）。 */
+const FONT_KEY = 'exam-memo-font';
+
+/** 档位文案（下标 = 索引）：标准 / 大 / 特大。 */
+const FONT_LABELS = ['标准', '大', '特大'];
+
+/** 宽屏阈值（px）——与 `style.css` 的 `@media (min-width: 740px)` 同值（§2.19 C；原拟 768，见 §2.17 观察项 21）。 */
+const WIDE_MIN_WIDTH = 740;
+
+function storage() {
+  try { return globalThis.localStorage || null; } catch (err) { return null; }
+}
+
+/** 读用户选择：合法索引 → 数字；未选择 / 值非法 / 存储不可用 → null（与首帧脚本同一口径）。 */
+function storedFontLevel() {
+  const store = storage();
+  if (!store) return null;
+  try {
+    const raw = store.getItem(FONT_KEY);
+    return raw === '0' || raw === '1' || raw === '2' ? Number(raw) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+/** 是否宽屏（≥740px）；无 `matchMedia` 的环境回 false（DOM 桩 / 老浏览器）。 */
+function isWideView() {
+  try {
+    if (typeof globalThis.matchMedia !== 'function') return false;
+    return globalThis.matchMedia(`(min-width: ${WIDE_MIN_WIDTH}px)`).matches === true;
+  } catch (err) {
+    return false;
+  }
+}
+
+/** 当前档位 = 用户选择优先；无选择时宽屏默认「大」、手机「标准」（§2.19 B·C）。 */
+function currentFontLevel() {
+  const stored = storedFontLevel();
+  return stored === null ? (isWideView() ? 1 : 0) : stored;
+}
+
+/** 写根元素属性（与首帧脚本同一属性口径）；非法档位 → 不动（fail-closed）。 */
+function applyFontLevel(level) {
+  if (!(level === 0 || level === 1 || level === 2)) return;
+  const root = globalThis.document ? globalThis.document.documentElement : null;
+  if (root && typeof root.setAttribute === 'function') root.setAttribute('data-font', String(level));
+}
+
+/** 点一下换一档（循环 0→1→2→0）：套用 + 落存储，返回新档位。 */
+function cycleFontLevel() {
+  const next = (currentFontLevel() + 1) % FONT_LABELS.length;
+  applyFontLevel(next);
+  const store = storage();
+  if (store) {
+    try { store.setItem(FONT_KEY, String(next)); } catch (err) { console.error('字号偏好保存失败', err); }
+  }
+  return next;
+}
+
+__MODULES__["src/ui/font.mjs"] = { storedFontLevel: storedFontLevel, isWideView: isWideView, currentFontLevel: currentFontLevel, applyFontLevel: applyFontLevel, cycleFontLevel: cycleFontLevel, FONT_KEY: FONT_KEY, FONT_LABELS: FONT_LABELS, WIDE_MIN_WIDTH: WIDE_MIN_WIDTH };
+}());
+(function () {
 // 模拟考试纯逻辑（设计档 §2.11.8 / §2.4.1 / KD-29–KD-33）：抽题 / 计分 / 剩余时间格式化。
 // 无 DOM、无 IO：random 由调用方传入（§2.4.2 注入缝），因此可完全单测。
 
@@ -3663,6 +3729,7 @@ __MODULES__["src/ui/groups.mjs"] = { uiFlag: uiFlag, seedOf: seedOf, currentMast
 const { EXAM_DURATION_MS, EXAM_TOTAL, examPoolTotal } = __MODULES__["src/core/exam.mjs"];
 const { isCollection, MEMORIZE_TYPES, MODE_LABELS, NUMBERS, PRACTICE_TYPES, TYPE_LABELS, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
 const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
+const { FONT_LABELS } = __MODULES__["src/ui/font.mjs"];
 
 const MODE_HINTS = {
   memorize: '看题 → 一次给全，不判分',
@@ -3689,8 +3756,19 @@ function shouldShowInstallHint(ui) {
 function renderEntryMatrix(container, view) {
   clear(container);
   const bank = view.bank;
+  // R31（§2.19 B）：标题行 = 标题 + 字号三档按钮（文案 = 当前档；点一下换一档、循环；空库态也呈现）
+  const fontLabel = FONT_LABELS[view.fontLevel] || FONT_LABELS[0];
   const screen = el('main', { class: 'screen' }, [
-    el('h1', { class: 'app-title', text: '高级工背题' }),
+    el('h1', { class: 'app-title app-head' }, [
+      el('span', { text: '高级工背题' }),
+      el('button', {
+        class: 'btn font-switch',
+        type: 'button',
+        text: `字号：${fontLabel}`,
+        dataset: { fontSwitch: 'true' },
+        on: { click: view.onCycleFont },
+      }),
+    ]),
   ]);
 
   if (shouldShowInstallHint(view.ui)) {
@@ -3889,6 +3967,7 @@ const { openStore } = __MODULES__["src/core/store.mjs"];
 const { adoptBank, loadBank } = __MODULES__["src/ui/bank-load.mjs"];
 const { renderCard } = __MODULES__["src/ui/card.mjs"];
 const { clear } = __MODULES__["src/ui/dom.mjs"];
+const { currentFontLevel, cycleFontLevel } = __MODULES__["src/ui/font.mjs"];
 const { attachDoubleTapGuard } = __MODULES__["src/ui/gesture.mjs"];
 const { openExam } = __MODULES__["src/ui/exam.mjs"];
 const { createImportFlow } = __MODULES__["src/ui/import.mjs"];
@@ -3972,6 +4051,8 @@ function renderMatrix(app) {
     onClearMastered: () => clearMastered(app),
     onToggleUnmasteredOnly: () => toggleUnmasteredOnly(app),
     onToggleShuffled: () => toggleShuffled(app),
+    fontLevel: currentFontLevel(), // R31（§2.19 B）：当前档（用户选择优先；无选择时宽屏默认「大」）
+    onCycleFont: () => cycleFont(app),
     ui: app.uiState,
     notice: app.notice,
     onDismissInstallHint: () => dismissInstallHint(app),
@@ -4224,6 +4305,12 @@ function toggleShuffled(app) {
 function dismissInstallHint(app) {
   app.uiState = Object.assign({}, app.uiState, { installHintDismissed: true });
   saveUiState(app);
+  render(app);
+}
+
+/** R31（§2.19 B）：点一下换一档（循环 0→1→2→0）——套用 + 落存储 + 重绘首页。 */
+function cycleFont(app) {
+  cycleFontLevel();
   render(app);
 }
 
