@@ -573,3 +573,209 @@ select, input[type="text"] {
 .exam-resume {
   font-size: 0.8824rem;
 }
+
+/* 错题闭环样式（006：US-33–US-38 / §2.11.9–§2.11.14）：
+   答题卡（遮罩 + 网格）· 斩题二次确认 · 考试结果页逐题核对 · 易错 chip · 轮次完成态面板 · 已斩题区块。
+   构建拼接源第 4 位（§2.4.5）：style.css → style-import.css → style-exam.css → style-wrongloop.css。
+   字号只写 rem（AC-45：px 字号只允许根字号三档 + 宽屏默认档）。 */
+
+/* —— 答题卡（US-36） —— */
+.sheet-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(20, 24, 32, 0.45);
+}
+.sheet-panel {
+  width: 100%;
+  max-width: 720px;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--card, #fff);
+  border-radius: 14px;
+  padding: 14px 14px 18px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+}
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.sheet-title {
+  font-size: 1rem;
+  margin: 0;
+}
+.sheet-grid {
+  gap: 8px;
+}
+.sheet-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 4px;
+  min-height: 44px;
+}
+.sheet-cell-index {
+  font-size: 0.9412rem;
+  font-variant-numeric: tabular-nums;
+}
+.sheet-cell-state {
+  font-size: 0.7059rem;
+  color: var(--muted);
+}
+.sheet-correct .sheet-cell-state, .sheet-answered .sheet-cell-state {
+  color: var(--ok);
+}
+.sheet-wrong .sheet-cell-state {
+  color: var(--bad);
+}
+.sheet-current {
+  outline: 2px solid var(--brand);
+}
+.sheet-current .sheet-cell-state {
+  color: var(--brand);
+}
+
+/* —— 斩题二次确认（US-34） —— */
+.kill-confirm-panel {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.kill-confirm-text {
+  font-size: 0.8824rem;
+  margin: 0 0 8px;
+}
+
+/* —— 易错 chip / 题型分布（US-35 / US-38） —— */
+.chip-weak {
+  background: #fee2e2;
+  color: var(--bad);
+}
+.type-distribution {
+  font-size: 0.7647rem;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
+/* —— 轮次完成态面板（US-37）：接在答错反馈之下（反馈在上、面板在下） —— */
+.round-panel {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.round-line {
+  font-size: 0.9412rem;
+  margin: 0 0 10px;
+}
+.round-panel .round-next {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+/* —— 考试结果页逐题核对（US-33） —— */
+.review-list {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+}
+.review-row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.review-killed .review-stem, .review-killed .review-mine, .review-killed .review-answer {
+  color: var(--muted);
+}
+.review-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.8824rem;
+}
+.review-index {
+  min-width: 24px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.review-type {
+  min-width: 52px;
+}
+.review-source {
+  flex: 1;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.review-outcome {
+  font-weight: 600;
+}
+.review-outcome.outcome-correct {
+  color: var(--ok);
+}
+.review-outcome.outcome-wrong {
+  color: var(--bad);
+}
+.review-outcome.outcome-blank, .review-outcome.outcome-pending {
+  color: var(--muted);
+}
+.review-killed-tag {
+  font-size: 0.7647rem;
+  color: var(--muted);
+}
+.review-stem {
+  font-size: 0.9412rem;
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+.review-mine, .review-answer {
+  font-size: 0.8824rem;
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+.review-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* —— 已斩题区块与恢复面（US-34 / KD-44） —— */
+.killed-block {
+  margin-top: 18px;
+}
+.killed-list {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+}
+.killed-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.8824rem;
+}
+.killed-row-index {
+  min-width: 24px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.killed-row-type {
+  min-width: 52px;
+}
+.killed-row-source {
+  flex: 1;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}

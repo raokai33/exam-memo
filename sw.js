@@ -1,5 +1,5 @@
 // 生成物 —— 由 tools/build.mjs 生成，请勿手改
-const CACHE_NAME = 'exam-memo-1301dbd7';
+const CACHE_NAME = 'exam-memo-bec09d77';
 const PRECACHE = [
   "./",
   "./index.html",

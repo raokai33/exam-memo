@@ -364,11 +364,14 @@ const PRACTICE_TYPES = ['all', 'single', 'multi', 'judge', 'fill', 'essay'];
 const QUESTION_TYPES = ['single', 'multi', 'judge', 'fill', 'essay'];
 const WRONGBOOK = 'wrongbook';
 const NUMBERS = 'numbers';
+const WEAK = 'weak';
+/** 易错判据（US-35 / KD-39）：累计答错次数达到该值即「易错」。 */
+const WEAK_THRESHOLD = 2;
 
 const MODE_LABELS = { memorize: '背题', practice: '练习' };
 const TYPE_LABELS = {
   all: '全部', single: '单选', multi: '多选', judge: '判断', fill: '填空', essay: '简答',
-  wrongbook: '错题本', numbers: '数字专项',
+  wrongbook: '错题本', numbers: '数字专项', weak: '易错题',
 };
 
 /** 组键 = `mode|type`（§2.10.3）。 */
@@ -377,13 +380,14 @@ function groupKey(mode, type) {
 }
 
 /** 集合型入口：题集随作答实时变化，不持久化 order / index，游标 = cursorQid（§2.10.3）。 */
-const COLLECTION_TYPES = [WRONGBOOK, NUMBERS];
+const COLLECTION_TYPES = [WRONGBOOK, NUMBERS, WEAK];
 
+/** 集合型判据由 COLLECTION_TYPES 派生——加第 3 个入口时四处跟随面（§2.11.11）自动覆盖。 */
 function isCollection(type) {
-  return type === WRONGBOOK || type === NUMBERS;
+  return COLLECTION_TYPES.indexOf(type) >= 0;
 }
 
-/** 入口矩阵：背题 × 6 + 练习 × 6 + 错题本 + 数字专项 = 14 组（§2.11.1）。 */
+/** 入口矩阵：背题 × 6 + 练习 × 6 + 错题本 + 数字专项 + 易错题 = 15 组（§2.11.1）。 */
 function entryMatrix() {
   const out = [];
   for (const mode of MODES) {
@@ -395,7 +399,7 @@ function entryMatrix() {
 }
 
 /**
- * 该入口覆盖的题型集合：两个集合型入口 = 全 5 题型（错题本含简答）；
+ * 该入口覆盖的题型集合：三个集合型入口 = 全 5 题型（错题本含简答）；
  * 「练习 × 全部」= 4 类，不含简答（§2.11.1）。
  */
 function typesForGroup(mode, type) {
@@ -412,20 +416,39 @@ function isNumberQuestion(question) {
 }
 
 /**
+ * 已斩题排除（US-34 / KD-37）：单一判据，过滤下沉到 `selectQuestions`（§2.11.10）。
+ * @param {Array} questions
+ * @param {Iterable<string>|Set<string>} [killed]
+ */
+function excludeKilled(questions, killed) {
+  const dead = killed instanceof Set ? killed : new Set(killed || []);
+  if (dead.size === 0) return (questions || []).slice();
+  return (questions || []).filter((question) => !dead.has(question.id));
+}
+
+/**
  * 选出该入口的题目（顺序 = 源表顺序，questions 已按表顺序 → 行号升序）。
+ * 已斩题先排除，再按 mode×type 分派（§2.11.10 / §2.11.11）。
  * @param {Array} questions
  * @param {string} mode
  * @param {string} type
  * @param {Iterable<string>} [wrongQids]
+ * @param {object} [wrongCounts] qid → 累计答错次数（易错题判据）
+ * @param {Iterable<string>} [killed] 已斩题 qid
  */
-function selectQuestions(questions, mode, type, wrongQids) {
+function selectQuestions(questions, mode, type, wrongQids, wrongCounts, killed) {
+  const pool = excludeKilled(questions, killed);
   if (mode === 'practice' && type === WRONGBOOK) {
     const set = wrongQids instanceof Set ? wrongQids : new Set(wrongQids || []);
-    return questions.filter((q) => set.has(q.id));
+    return pool.filter((q) => set.has(q.id));
   }
-  if (mode === 'practice' && type === NUMBERS) return questions.filter(isNumberQuestion);
+  if (mode === 'practice' && type === NUMBERS) return pool.filter(isNumberQuestion);
+  if (mode === 'practice' && type === WEAK) {
+    const counts = wrongCounts || {};
+    return pool.filter((q) => (Number(counts[q.id]) || 0) >= WEAK_THRESHOLD);
+  }
   const types = typesForGroup(mode, type);
-  return questions.filter((q) => types.has(q.type));
+  return pool.filter((q) => types.has(q.type));
 }
 
 function emptyProgress(group) {
@@ -577,6 +600,66 @@ function selectUnmastered(questions, mastery) {
   return (questions || []).filter((question) => mastery.get(question.id) !== 'mastered');
 }
 
+/**
+ * 组内轮次（US-37 / KD-41）：本轮题池 + 已作答 + 本轮答错，全部内存态、不落存储。
+ * @param {Array<string>} ids 本轮题池（第 1 轮 = 组序，其后 = 上一轮答错的题）
+ */
+function startRound(ids) {
+  return { ids: (ids || []).slice(), done: new Set(), wrong: new Set() };
+}
+
+/** 记一次作答：只认本轮题池内的题；答对则从错集里除名（同一题重答以最后一次为准）。 */
+function markRound(round, qid, correct) {
+  if (!round || !Array.isArray(round.ids) || round.ids.indexOf(qid) < 0) return round;
+  const done = new Set(round.done);
+  done.add(qid);
+  const wrong = new Set(round.wrong);
+  if (correct) wrong.delete(qid);
+  else wrong.add(qid);
+  return { ids: round.ids.slice(), done, wrong };
+}
+
+/** 本轮统计（完成态面板三项 + 下一轮题池）：complete = 本轮题池每题都作答过。 */
+function roundSummary(round) {
+  const ids = round && Array.isArray(round.ids) ? round.ids : [];
+  const done = round && round.done ? round.done : new Set();
+  const wrongSet = round && round.wrong ? round.wrong : new Set();
+  const wrongIds = ids.filter((id) => wrongSet.has(id));
+  return {
+    total: ids.length,
+    answered: ids.filter((id) => done.has(id)).length,
+    correct: ids.filter((id) => done.has(id) && !wrongSet.has(id)).length,
+    wrong: wrongIds.length,
+    wrongIds,
+    complete: ids.length > 0 && ids.every((id) => done.has(id)),
+  };
+}
+
+/** 题型分布（US-38 / §2.11.13）：按 QUESTION_TYPES 顺序计数，不足显 0。 */
+function typeDistribution(ids, questionIndex) {
+  const out = {};
+  for (const type of QUESTION_TYPES) out[type] = 0;
+  for (const qid of ids || []) {
+    const question = questionIndex && questionIndex.get ? questionIndex.get(qid) : null;
+    const type = question ? question.type : null;
+    if (type && Object.prototype.hasOwnProperty.call(out, type)) out[type] += 1;
+  }
+  return out;
+}
+
+/**
+ * 答题卡逐格状态（US-36 / KD-40 练习面）：实时计算，不新增持久化字段。
+ * 状态 = unanswered / correct / wrong（简答的三态文案由渲染侧按题型映射）。
+ */
+function sheetCells(ids, response) {
+  const answers = response || {};
+  return (ids || []).map((id, index) => {
+    const answered = Object.prototype.hasOwnProperty.call(answers, id);
+    return { id, index, state: !answered ? 'unanswered' : (answers[id] === true ? 'correct' : 'wrong') };
+  });
+}
+
+
 /** 游标定位：找不到（被移出 / 集合变了）→ 从首题开始。 */
 function cursorIndex(order, cursorQid) {
   if (!cursorQid) return 0;
@@ -592,7 +675,7 @@ function progressForStore(progress, group) {
   return rest;
 }
 
-__MODULES__["src/core/progress.mjs"] = { groupKey: groupKey, isCollection: isCollection, entryMatrix: entryMatrix, typesForGroup: typesForGroup, isNumberQuestion: isNumberQuestion, selectQuestions: selectQuestions, emptyProgress: emptyProgress, ensureProgress: ensureProgress, recordAnswer: recordAnswer, accuracy: accuracy, addWrong: addWrong, removeWrong: removeWrong, bumpWrongCount: bumpWrongCount, wrongbookOrderByWeight: wrongbookOrderByWeight, shuffledOrder: shuffledOrder, hash32: hash32, masteryOf: masteryOf, masterySummary: masterySummary, selectUnmastered: selectUnmastered, cursorIndex: cursorIndex, progressForStore: progressForStore, MODES: MODES, MEMORIZE_TYPES: MEMORIZE_TYPES, PRACTICE_TYPES: PRACTICE_TYPES, QUESTION_TYPES: QUESTION_TYPES, WRONGBOOK: WRONGBOOK, NUMBERS: NUMBERS, MODE_LABELS: MODE_LABELS, TYPE_LABELS: TYPE_LABELS, COLLECTION_TYPES: COLLECTION_TYPES };
+__MODULES__["src/core/progress.mjs"] = { groupKey: groupKey, isCollection: isCollection, entryMatrix: entryMatrix, typesForGroup: typesForGroup, isNumberQuestion: isNumberQuestion, excludeKilled: excludeKilled, selectQuestions: selectQuestions, emptyProgress: emptyProgress, ensureProgress: ensureProgress, recordAnswer: recordAnswer, accuracy: accuracy, addWrong: addWrong, removeWrong: removeWrong, bumpWrongCount: bumpWrongCount, wrongbookOrderByWeight: wrongbookOrderByWeight, shuffledOrder: shuffledOrder, hash32: hash32, masteryOf: masteryOf, masterySummary: masterySummary, selectUnmastered: selectUnmastered, startRound: startRound, markRound: markRound, roundSummary: roundSummary, typeDistribution: typeDistribution, sheetCells: sheetCells, cursorIndex: cursorIndex, progressForStore: progressForStore, MODES: MODES, MEMORIZE_TYPES: MEMORIZE_TYPES, PRACTICE_TYPES: PRACTICE_TYPES, QUESTION_TYPES: QUESTION_TYPES, WRONGBOOK: WRONGBOOK, NUMBERS: NUMBERS, WEAK: WEAK, WEAK_THRESHOLD: WEAK_THRESHOLD, MODE_LABELS: MODE_LABELS, TYPE_LABELS: TYPE_LABELS, COLLECTION_TYPES: COLLECTION_TYPES };
 }());
 (function () {
 // 存储层 —— 三级后端 + 启动探测 + 降级报告（设计档 §2.4.1 / §2.10）。
@@ -2024,12 +2107,128 @@ function byId(id) {
 __MODULES__["src/ui/dom.mjs"] = { el: el, add: add, clear: clear, byId: byId };
 }());
 (function () {
+// 入口 / 组的视图模型 —— 由 app 状态派生「这组有多少题、什么顺序、空态说什么」
+// （设计档 §2.11.1 / §2.11.5 / §2.11.6 / §2.11.10 / §2.11.13）。由 app.mjs 迁出，守 N8 行数纪律；纯读，不改状态。
+
+const { accuracy, groupKey, isCollection, masteryOf, masterySummary, roundSummary, selectQuestions, selectUnmastered, shuffledOrder, typeDistribution, WEAK, WRONGBOOK, wrongbookOrderByWeight } = __MODULES__["src/core/progress.mjs"];
+
+function uiFlag(app, key) {
+  return !!(app.uiState && app.uiState[key]);
+}
+
+/** 乱序种子：未生成过（仍为 0）时同种子同序，仍确定（R20）。 */
+function seedOf(app) {
+  const seed = app.uiState ? app.uiState.shuffleSeed : null;
+  return typeof seed === 'number' ? seed : 0;
+}
+
+function progressList(app) {
+  return Array.from(app.progressCache.values());
+}
+
+/** 掌握度聚合口径：跨【全部已存进度组】，含三个集合型组（§2.11.6①）。 */
+function currentMastery(app) {
+  return masteryOf((app.bank && app.bank.questions) || [], progressList(app));
+}
+
+/** 该入口的题目集合：已斩题先排除（过滤下沉在 selectQuestions，本文件不写自己的过滤）。 */
+function poolOf(app, mode, type) {
+  return selectQuestions(
+    (app.bank && app.bank.questions) || [],
+    mode,
+    type,
+    app.wrong,
+    app.wrongCounts,
+    app.killed,
+  );
+}
+
+/** 入口 meta 的原料：背题 = 正确率；练习 6 组 = 掌握度三分；集合型 = 题数（错题本另带题型分布）。 */
+function groupSummary(app, mode, type) {
+  if (!app.bank) {
+    if (isCollection(type)) return { total: 0 };
+    return mode === 'practice'
+      ? { total: 0, mastery: { total: 0, mastered: 0, failed: 0, untrained: 0 } }
+      : { total: 0, accuracy: null };
+  }
+  if (isCollection(type)) {
+    const ids = orderFor(app, mode, type);
+    const summary = { total: ids.length };
+    if (type === WRONGBOOK) summary.distribution = typeDistribution(ids, app.questionIndex);
+    return summary;
+  }
+  const selected = poolOf(app, mode, type);
+  if (mode === 'practice') {
+    return { total: selected.length, mastery: masterySummary(selected, progressList(app)) };
+  }
+  const progress = app.progressCache.get(groupKey(mode, type));
+  return { total: selected.length, accuracy: progress ? accuracy(progress) : null };
+}
+
+/** 该入口的题目顺序（源表序为底；练习 6 组可叠加「只练没掌握的」与「乱序」）。 */
+function orderFor(app, mode, type) {
+  const selected = poolOf(app, mode, type);
+  if (mode === 'practice' && type === WRONGBOOK) {
+    // 错题本 = 错次降序、平手按源表下标升序（R17），不洗牌、不受开关影响
+    return wrongbookOrderByWeight(selected.map((q) => q.id), app.wrong, app.wrongCounts);
+  }
+  if (mode === 'practice' && type === WEAK) {
+    // 易错题与错题本同一口径：错次降序 + 平手源表序（§2.11.11）
+    const ids = selected.map((q) => q.id);
+    return wrongbookOrderByWeight(ids, new Set(ids), app.wrongCounts);
+  }
+  if (isCollection(type)) return selected.map((q) => q.id);
+  let picked = selected;
+  if (mode !== 'practice') return picked.map((q) => q.id);
+  if (uiFlag(app, 'practiceUnmasteredOnly')) picked = selectUnmastered(picked, currentMastery(app));
+  let ids = picked.map((q) => q.id);
+  if (uiFlag(app, 'practiceShuffled')) ids = shuffledOrder(ids, seedOf(app));
+  return ids;
+}
+
+/** 过滤后为空的练习组要说明「都掌握了」，不是「没有题目」（§2.11.5）。 */
+function emptyTextFor(app) {
+  if (!app.bank || !app.group || app.order.length > 0) return null;
+  const { mode, type } = app.group;
+  if (mode !== 'practice' || isCollection(type) || !uiFlag(app, 'practiceUnmasteredOnly')) return null;
+  return poolOf(app, mode, type).length > 0 ? '这一组的题都已掌握 —— 没有需要重练的题。' : null;
+}
+
+/** 题卡的视图模型（US-34 / US-35 / US-37 / US-38）：只读派生字段，交互接线由宿主（app.mjs）补齐。 */
+function cardView(app) {
+  const qid = app.order[app.index];
+  const question = qid ? app.questionIndex.get(qid) || null : null;
+  return {
+    question,
+    mode: app.group.mode,
+    group: app.group,
+    index: app.index, total: app.order.length,
+    response: app.response, feedback: app.feedback,
+    essayStage: app.essayStage, essayDraft: app.essayDraft,
+    completed: app.completed, answerShown: app.answerShown, emptyText: emptyTextFor(app),
+    notice: app.notice, // 斩题等一次性提示（与首页同一个 notice 通道）
+    accuracy: app.progress ? accuracy(app.progress) : null,
+    answeredCount: app.progress ? app.progress.stats.attempts : 0,
+    canRemoveWrong: app.group.mode === 'practice' && app.group.type === WRONGBOOK,
+    wrongCount: question ? (Number(app.wrongCounts && app.wrongCounts[question.id]) || 0) : 0,
+    distribution: app.group.type === WRONGBOOK ? typeDistribution(app.order, app.questionIndex) : null,
+    round: roundSummary(app.round),
+  };
+}
+
+__MODULES__["src/ui/groups.mjs"] = { uiFlag: uiFlag, seedOf: seedOf, currentMastery: currentMastery, groupSummary: groupSummary, orderFor: orderFor, emptyTextFor: emptyTextFor, cardView: cardView };
+}());
+(function () {
 // 会话持久化 / 诊断字段 / service worker 注册 —— 由 app.mjs 迁出（设计档 §2.4.4 / §2.10.3 / §2.11.6 / §2.12.2）。
 // 只经 app.store 的存储接口读写；界面状态由 app.mjs 持有。
 
 const { SCHEMA_VERSION } = __MODULES__["src/core/bank.mjs"];
-const { ensureProgress, entryMatrix, progressForStore } = __MODULES__["src/core/progress.mjs"];
+const { cursorIndex, ensureProgress, entryMatrix, groupKey, progressForStore, startRound } = __MODULES__["src/core/progress.mjs"];
 const { byId } = __MODULES__["src/ui/dom.mjs"];
+const { orderFor } = __MODULES__["src/ui/groups.mjs"];
+
+/** 已斩题集合的存储键（§2.10.3 数据模型）。 */
+const KILLED_KEY = 'killed';
 
 /** 读回错题本（题目集合 + 错次）；换表时连同进度一起备份，避免旧册子被后续写入覆盖（KD-13）。 */
 async function loadWrongbook(app, backup) {
@@ -2047,7 +2246,32 @@ async function loadWrongbook(app, backup) {
   }
 }
 
-/** 预读 14 组进度：进入题卡即用，不必等 IO。 */
+/**
+ * 读回已斩题集合（US-34 / KD-38）：换表时自写 `killed@old`——不搭 `backupProgress` 的班车。
+ * @param {object} app
+ * @param {boolean} backup 本次是否为「换表」
+ */
+async function loadKilled(app, backup) {
+  if (!app.store) return;
+  try {
+    const stored = await app.store.loadKey(KILLED_KEY);
+    const qids = Array.isArray(stored) ? stored.filter((qid) => typeof qid === 'string') : [];
+    if (backup && qids.length > 0) await app.store.saveKey('killed@old', qids);
+    app.killed = new Set(qids);
+  } catch (err) {
+    app.killed = new Set();
+  }
+}
+
+/** 保存已斩题集合（数据面，与错题本同口径：不删任何其他数据）。 */
+function persistKilled(app) {
+  if (!app.store) return Promise.resolve();
+  return app.store.saveKey(KILLED_KEY, Array.from(app.killed)).catch((err) => {
+    console.error('斩题保存失败', err);
+  });
+}
+
+/** 预读 15 组进度：进入题卡即用，不必等 IO。 */
 async function preloadProgress(app) {
   if (!app.store) return;
   for (const entry of entryMatrix()) {
@@ -2068,6 +2292,39 @@ async function loadUiState(app) {
   } catch (err) {
     app.uiState = null;
   }
+}
+
+/** 进组（§2.10.3）：读进度 → 算组序 → 建本轮题池 → 定位游标 → 复位到题卡。`ops` = 宿主的复位 / 重画。 */
+async function enterGroup(app, mode, type, ops) {
+  ops.cancelAdvance(app);
+  const key = groupKey(mode, type);
+  let stored = app.progressCache.get(key) || null;
+  if (!stored && app.store) {
+    try { stored = await app.store.loadProgress(key); } catch (err) { stored = null; }
+  }
+  const progress = ensureProgress(stored, key);
+  app.progressCache.set(key, progress);
+  app.group = { mode, type, groupKey: key };
+  app.order = orderFor(app, mode, type);
+  app.progress = progress;
+  app.index = cursorIndex(app.order, progress.cursorQid);
+  app.round = startRound(app.order); // 第 1 轮题池 = 本次进组的组序（US-37）
+  app.roundReplay = false; // 首次进组的轮次照旧回看（R28）；重练轮由调用点置真
+  ops.resetQuestionState(app);
+  app.view = 'card';
+  ops.render(app);
+}
+
+/** 绝对定位（答题卡跳题与轮次重建共用）：改游标 → 复位 → 按既有规则落进度。 */
+function goTo(app, next, ops) {
+  app.index = next;
+  ops.resetQuestionState(app);
+  const qid = app.order[app.index];
+  if (qid && app.progress) {
+    app.progress = Object.assign({}, app.progress, { cursorQid: qid });
+    persistProgress(app);
+  }
+  ops.render(app);
 }
 
 /** 保存当前组进度；集合型入口不落 order / index（§2.10.3）。 */
@@ -2128,14 +2385,14 @@ function registerServiceWorker() {
   }
 }
 
-__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, preloadProgress: preloadProgress, loadUiState: loadUiState, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag, registerServiceWorker: registerServiceWorker };
+__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, loadKilled: loadKilled, persistKilled: persistKilled, preloadProgress: preloadProgress, loadUiState: loadUiState, enterGroup: enterGroup, goTo: goTo, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag, registerServiceWorker: registerServiceWorker };
 }());
 (function () {
 // 题库装载（N8 拆分自 app.mjs）：读存储 / 内嵌题库、换表备份与重绘（§2.10.3 / §2.4.2）。
 // 装载结束时的整体重绘由调用方传入 render，避免本模块反向依赖 app.mjs。
 const { entryMatrix } = __MODULES__["src/core/progress.mjs"];
 const { backupProgress } = __MODULES__["src/core/store.mjs"];
-const { loadUiState, loadWrongbook, preloadProgress } = __MODULES__["src/ui/session.mjs"];
+const { loadKilled, loadUiState, loadWrongbook, preloadProgress } = __MODULES__["src/ui/session.mjs"];
 
 /** 启动装载：已存题库优先；单文件形态的内嵌题库与已存指纹不一致时按换表处理（§2.10.3）。 */
 async function loadBank(app, opts, render) {
@@ -2156,6 +2413,7 @@ async function loadBank(app, opts, render) {
     app.bank = record || embed;
     indexQuestions(app);
     await loadWrongbook(app, false);
+    await loadKilled(app, false); // 已斩题集合（US-34）：与错题本同口径读回
     if (app.store && !record) {
       try { await app.store.saveBank(embed); } catch (err) { console.error('内置题库写入存储失败', err); }
     }
@@ -2170,6 +2428,7 @@ async function adoptBank(app, record, render) {
   const changed = !!(previous && previous.bankFingerprint && record.bankFingerprint
     && previous.bankFingerprint !== record.bankFingerprint);
   await loadWrongbook(app, changed);
+  await loadKilled(app, changed); // 换表：旧值留 killed@old（不搭 backupProgress 的班车，KD-38）
   if (changed && app.store) {
     const groups = entryMatrix().map((entry) => entry.groupKey);
     const backed = await backupProgress(app.store, groups);
@@ -2372,14 +2631,271 @@ function attachDoubleTapGuard(el) {
 __MODULES__["src/ui/gesture.mjs"] = { swipeDirection: swipeDirection, attachSwipe: attachSwipe, isDoubleTap: isDoubleTap, attachDoubleTapGuard: attachDoubleTapGuard, SWIPE_MIN_PX: SWIPE_MIN_PX, SWIPE_DOMINANCE: SWIPE_DOMINANCE, SWIPE_EDGE_GUARD_PX: SWIPE_EDGE_GUARD_PX, DOUBLE_TAP_MS: DOUBLE_TAP_MS, DOUBLE_TAP_SLOP_PX: DOUBLE_TAP_SLOP_PX, TAP_MOVE_MAX_PX: TAP_MOVE_MAX_PX };
 }());
 (function () {
-// 题卡 —— 背题（§2.11.2 / R13 / R24：延迟揭示）与练习（§2.11.3 / R14 / R15 / R19 / R26）。
+// 斩题动作与「已斩题」恢复面（US-34 / §2.11.10 / KD-38 / KD-44）。
+// 动作只动 `killed`（+ 落盘）：`progress:*` / `wrongbook` / `counts` 一律不动，恢复后统计照旧。
+// 不新建独立设置页——恢复面 = 入口矩阵页末尾区块 + 一个视图分支（KD-44）。
+const { TYPE_LABELS } = __MODULES__["src/core/progress.mjs"];
+const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
+const { orderFor } = __MODULES__["src/ui/groups.mjs"];
+const { goTo, persistKilled } = __MODULES__["src/ui/session.mjs"];
+
+/** 二次确认面板（先例 = 考试交卷的两步确认：确认前零写入）；`view.text` 供结果页用「这题」的说法。 */
+function killPanel(view) {
+  return el('div', { class: 'kill-confirm-panel' }, [
+    el('p', {
+      class: 'kill-confirm-text',
+      text: view.text || '斩掉本题？斩掉后本题不再出现在任何入口与考试抽题里（可在首页恢复）。',
+    }),
+    el('div', { class: 'actions' }, [
+      el('button', {
+        class: 'btn btn-primary kill-confirm',
+        type: 'button',
+        text: '确认斩掉',
+        on: { click: view.onConfirmKill },
+      }),
+      el('button', {
+        class: 'btn kill-cancel',
+        type: 'button',
+        text: '取消',
+        on: { click: view.onCancelKill },
+      }),
+    ]),
+  ]);
+}
+
+/** 斩掉一题：入 `killed` 并落盘（不删任何数据）。 */
+async function killQuestion(app, qid) {
+  if (!qid) return;
+  app.killed = new Set(app.killed || []);
+  app.killed.add(qid);
+  await persistKilled(app);
+}
+
+/** 恢复一题：从 `killed` 移除并落盘（题回到各入口，统计照旧）。 */
+async function restoreQuestion(app, qid) {
+  app.killed = new Set(app.killed || []);
+  app.killed.delete(qid);
+  await persistKilled(app);
+}
+
+/** 全部恢复。 */
+async function restoreAllKilled(app) {
+  app.killed = new Set();
+  await persistKilled(app);
+}
+
+/**
+ * 二次确认（US-34）：先出面板、确认后才写 `killed`（取消 = 零写入）。
+ * `app.killConfirm` 记的是**待斩的 qid**，不是布尔——换题后旧面板的确认点击不会斩到新题（AC-48 前置）。
+ */
+function askKill(app, ops) {
+  ops.cancelAdvance(app);
+  app.killConfirm = app.order[app.index] || null;
+  ops.render(app);
+}
+
+/** 取消斩题 = 关面板：复排被 `askKill` 一并取消的揭示（不补排这题的揭示就永久丢失）；已揭示 / 非背题组不排。 */
+function cancelKill(app, ops) {
+  app.killConfirm = null;
+  if (!app.answerShown) ops.scheduleReveal(app);
+  ops.render(app);
+}
+
+/**
+ * 确认斩掉当前题：面板记录的题与当前题一致才动手。
+ * 斩后定位到相邻未斩题（末条 → 上一条）；轮次内只从本轮题池剔除，第 1 轮按整组重算（§2.11.10 / §2.11.12）。
+ */
+async function confirmKill(app, ops) {
+  const pending = app.killConfirm;
+  app.killConfirm = null;
+  const qid = app.order[app.index];
+  if (!qid || !app.group || pending !== qid) return; // 不一致（换过题）→ 不斩
+  await killQuestion(app, qid);
+  app.notice = '已斩 · 可在首页恢复';
+  app.round = ops.dropFromRound(app.round, qid);
+  app.order = app.roundReplay ? app.order.filter((id) => id !== qid) : orderFor(app, app.group.mode, app.group.type);
+  if (app.order.length === 0) { app.index = 0; ops.resetQuestionState(app); ops.render(app); return; }
+  goTo(app, Math.min(app.index, app.order.length - 1), ops);
+}
+
+/**
+ * 已斩题视图（KD-44 的第五个视图分支）：列表 + 逐题恢复 / 全部恢复 + 返回首页。
+ * 恢复后题回到各入口、统计照旧（只动 `killed`）。
+ */
+function killedView(app, render) {
+  return {
+    killed: Array.from(app.killed), questionIndex: app.questionIndex,
+    onRestore: async (qid) => { await restoreQuestion(app, qid); render(app); },
+    onRestoreAll: async () => { await restoreAllKilled(app); render(app); },
+    onHome: () => { app.view = 'matrix'; render(app); },
+  };
+}
+
+/**
+ * 「已斩题」列表页（`app.view === 'killed'`）：逐题一行（序号 · 题型 · 来源题号）+「恢复」，底部「全部恢复」。
+ * @param {HTMLElement} container
+ * @param {object} view { killed: [qid...], questionIndex, onRestore, onRestoreAll, onHome }
+ */
+function renderKilledPage(container, view) {
+  const qids = view.killed || [];
+  const screen = el('main', { class: 'screen killed-view' }, [
+    el('h1', { class: 'app-title', text: '已斩题' }),
+    el('p', { class: 'matrix-hint', text: `已斩 ${qids.length} 题 · 斩掉的题不再出现在任何入口与考试抽题里。` }),
+  ]);
+  if (qids.length === 0) {
+    screen.appendChild(el('p', { class: 'empty', text: '暂无已斩题。' }));
+  } else {
+    screen.appendChild(el('ol', { class: 'killed-list' }, qids.map((qid, index) => {
+      const question = view.questionIndex && view.questionIndex.get ? view.questionIndex.get(qid) : null;
+      return el('li', { class: 'killed-row', dataset: { qid } }, [
+        el('span', { class: 'killed-row-index', text: String(index + 1) }),
+        el('span', { class: 'killed-row-type', text: question ? (TYPE_LABELS[question.type] || question.type) : '' }),
+        el('span', { class: 'killed-row-source', text: question ? question.sourceRow : qid }),
+        el('button', {
+          class: 'btn killed-restore',
+          type: 'button',
+          text: '恢复',
+          on: { click: () => view.onRestore(qid) },
+        }),
+      ]);
+    })));
+  }
+  screen.appendChild(el('div', { class: 'actions' }, [
+    el('button', {
+      class: 'btn btn-primary killed-restore-all',
+      type: 'button',
+      text: '全部恢复',
+      disabled: qids.length === 0,
+      on: { click: view.onRestoreAll },
+    }),
+    el('button', { class: 'btn killed-home', type: 'button', text: '返回首页', on: { click: view.onHome } }),
+  ]));
+  clear(container);
+  add(container, screen);
+}
+
+__MODULES__["src/ui/killed.mjs"] = { killPanel: killPanel, killQuestion: killQuestion, restoreQuestion: restoreQuestion, restoreAllKilled: restoreAllKilled, askKill: askKill, cancelKill: cancelKill, confirmKill: confirmKill, killedView: killedView, renderKilledPage: renderKilledPage };
+}());
+(function () {
+// 答题卡（US-36 / §2.11.9 / KD-40）：整份题号网格、分场景逐格状态、点格跳题。
+// 逐格状态实时计算（练习面读本组 response、背题只标当前位置、考试只标已答 / 未答），不新增持久化字段；
+// 跳题与关闭零写入（由调用方保证：跳题走既有定位路径、关闭只改界面状态）。
+const { sheetCells } = __MODULES__["src/core/progress.mjs"];
+const { el } = __MODULES__["src/ui/dom.mjs"];
+
+const PRACTICE_LABELS = { unanswered: '未答', correct: '答对', wrong: '答错' };
+const ESSAY_LABELS = { unanswered: '未自评', correct: '已自评会', wrong: '已自评不会' };
+
+function cellOf(index, state, label) {
+  return { index, state, label };
+}
+
+/** 练习面逐格：未答 / 答对 / 答错（简答 = 未自评 / 已自评会 / 已自评不会，§2.11.9）。 */
+function practiceSheetCells(ids, response, questionIndex) {
+  return sheetCells(ids, response).map((cell) => {
+    const question = questionIndex && questionIndex.get ? questionIndex.get(cell.id) : null;
+    const labels = question && question.type === 'essay' ? ESSAY_LABELS : PRACTICE_LABELS;
+    return cellOf(cell.index, cell.state, labels[cell.state]);
+  });
+}
+
+/** 背题面逐格：只给当前题一格「当前位置」，其余不加任何状态（背题不记对错，D3）。 */
+function memorizeSheetCells(ids, currentIndex) {
+  return (ids || []).map((id, index) => (index === currentIndex
+    ? cellOf(index, 'current', '当前位置')
+    : cellOf(index, 'none', '')));
+}
+
+/** 考试面逐格：只标已答 / 未答（考试中零判定信息不变，KD-30）。 */
+function examSheetCells(qids, answered) {
+  const done = answered instanceof Set ? answered : new Set(answered || []);
+  return (qids || []).map((qid, index) => (done.has(qid)
+    ? cellOf(index, 'answered', '已答')
+    : cellOf(index, 'unanswered', '未答')));
+}
+
+/**
+ * 题卡侧答题卡视图（US-36 / §2.11.9）：练习面三态（简答三态）/ 背题面只标当前位置；
+ * 未打开返回 null（渲染侧不输出遮罩）。
+ */
+function sheetModel(app, handlers) {
+  if (!app.sheetOpen) return null;
+  return {
+    title: '答题卡',
+    cells: app.group.mode === 'memorize'
+      ? memorizeSheetCells(app.order, app.index)
+      : practiceSheetCells(app.order, app.progress ? app.progress.response : {}, app.questionIndex),
+    onJump: handlers.onJump,
+    onClose: handlers.onClose,
+  };
+}
+
+/**
+ * 渲染遮罩 + 网格（布局复用导入确认页的 `.matrix-grid` 先例）。
+ * 点格 → 关闭并跳题；关闭按钮 / 点遮罩 / Esc → 关闭（不写任何存储）。
+ */
+function renderSheet(view) {
+  // 关闭 / 跳题都先把 document 上的 Esc 监听摘掉（不留指向已关闭遮罩的悬挂回调）
+  const close = () => { releaseSheetEscape(); view.onClose(); };
+  const jump = (index) => { releaseSheetEscape(); view.onJump(index); };
+  bindEscape(close);
+  const grid = el('div', { class: 'matrix-grid sheet-grid' }, (view.cells || []).map((cell) => el('button', {
+    class: `btn sheet-cell sheet-${cell.state}`,
+    type: 'button',
+    dataset: { index: String(cell.index), state: cell.state },
+    on: { click: () => jump(cell.index) },
+  }, [
+    el('span', { class: 'sheet-cell-index', text: String(cell.index + 1) }),
+    cell.label ? el('span', { class: 'sheet-cell-state', text: cell.label }) : null,
+  ])));
+
+  const mask = el('div', { class: 'sheet-mask', dataset: { sheet: 'true' } });
+  mask.appendChild(el('div', { class: 'sheet-panel' }, [
+    el('div', { class: 'sheet-head' }, [
+      el('h2', { class: 'sheet-title', text: view.title || '答题卡' }),
+      el('button', { class: 'btn btn-ghost sheet-close', type: 'button', text: '关闭', on: { click: close } }),
+    ]),
+    grid,
+  ]));
+  // 点遮罩关闭：只认落在遮罩本身的点击（格内点击由格子自己的处理接管）
+  mask.addEventListener('click', (event) => {
+    if (!event || event.target === mask) close();
+  });
+  return mask;
+}
+
+/** 摘掉答题卡的 Esc 监听（关闭题卡 / 换题 / 离开题卡都调它；同一时刻最多挂一个）。 */
+function releaseSheetEscape() {
+  const doc = globalThis.document;
+  if (escapeBound && doc && typeof doc.removeEventListener === 'function') doc.removeEventListener('keydown', escapeBound);
+  escapeBound = null;
+}
+
+/** Esc 关闭（§2.11.9）：重画时替换旧监听，不等同于堆叠；DOM 桩无键盘面时跳过（覆盖边界）。 */
+let escapeBound = null;
+function bindEscape(onEscape) {
+  const doc = globalThis.document;
+  if (!doc || typeof doc.addEventListener !== 'function') return;
+  releaseSheetEscape();
+  escapeBound = (event) => { if (event && event.key === 'Escape') onEscape(); };
+  doc.addEventListener('keydown', escapeBound);
+}
+
+__MODULES__["src/ui/sheet.mjs"] = { practiceSheetCells: practiceSheetCells, memorizeSheetCells: memorizeSheetCells, examSheetCells: examSheetCells, sheetModel: sheetModel, renderSheet: renderSheet, releaseSheetEscape: releaseSheetEscape };
+}());
+(function () {
+// 题卡 —— 背题（§2.11.2 / R13 / R24：延迟揭示）与练习（§2.11.3 / R14 / R15 / R19 / R26）；
+// 006 在本卡上叠加：答题卡入口（US-36）· 斩题二次确认（US-34）· 易错 chip（US-35）·
+// 轮次完成态面板（US-37）· 错题本题型分布行（US-38）。
 
 const { blankCountOf } = __MODULES__["src/core/answers.mjs"];
 const { TYPE_LABELS } = __MODULES__["src/core/detect.mjs"];
 const { displayText } = __MODULES__["src/core/grade.mjs"];
-const { MODE_LABELS, TYPE_LABELS: GROUP_TYPE_LABELS } = __MODULES__["src/core/progress.mjs"];
+const { MODE_LABELS, TYPE_LABELS: GROUP_TYPE_LABELS, WEAK_THRESHOLD, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
 const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
 const { attachSwipe } = __MODULES__["src/ui/gesture.mjs"];
+const { killPanel } = __MODULES__["src/ui/killed.mjs"];
+const { renderSheet } = __MODULES__["src/ui/sheet.mjs"];
 
 const MARK_LABELS = {
   partial: '数据残缺',
@@ -2409,6 +2925,9 @@ function renderCard(container, view) {
     el('div', { class: 'card-meta' }, [
       el('span', { class: 'source-row', text: question.sourceRow }),
       el('span', { class: 'chip chip-type', text: TYPE_LABELS[question.type] || question.type }),
+      view.wrongCount >= WEAK_THRESHOLD
+        ? el('span', { class: 'chip chip-weak', text: `易错 · 已错 ${view.wrongCount} 次` })
+        : null,
       ...(question.marks || []).map((mark) => el('span', { class: 'chip chip-mark', text: MARK_LABELS[mark] || mark })),
     ]),
     el('div', { class: 'card-actions' }, [
@@ -2420,6 +2939,12 @@ function renderCard(container, view) {
           on: { click: view.onRemoveWrong },
         })
         : null,
+      el('button', {
+        class: 'btn btn-ghost kill-ask',
+        type: 'button',
+        text: '斩掉本题',
+        on: { click: view.onAskKill },
+      }),
       el('button', { class: 'btn btn-ghost', type: 'button', text: '退出', on: { click: view.onExit } }),
     ]),
   ]);
@@ -2435,9 +2960,12 @@ function renderCard(container, view) {
       disabled: view.index <= 0,
       on: { click: view.onPrev },
     }),
-    el('span', {
-      class: 'counter',
+    el('button', {
+      class: 'btn counter',
+      type: 'button',
       text: `${view.index + 1} / ${view.total}`,
+      dataset: { sheetOpen: 'true' },
+      on: { click: view.onOpenSheet },
     }),
     el('button', {
       class: 'btn btn-primary',
@@ -2456,19 +2984,61 @@ function renderCard(container, view) {
 
   const screen = el('main', { class: 'screen' }, [
     summary,
+    // 一次性提示（斩题：已斩 · 可在首页恢复；同首页的 notice 通道）
+    view.notice ? el('p', { class: 'banner banner-warn card-notice', text: view.notice }) : null,
     el('article', { class: 'card' }, [
+      // 错题本题型分布行（US-38 / §2.11.13）：只在错题本组、chips 区之前
+      view.distribution && view.group.mode === 'practice' && view.group.type === WRONGBOOK
+        ? el('p', { class: 'type-distribution', text: distributionText(view.distribution, view.total) })
+        : null,
       head,
       body,
-      // 末题答对后不循环，停在本卡并明示整组完成（§2.11.3 / R14）
-      view.completed ? el('p', { class: 'banner banner-ok completed', text: '本组已完成' }) : null,
+      // 轮次完成态面板（US-37 / §2.11.12）：接在反馈横幅之下（反馈在上、面板在下同时可见）
+      view.completed ? roundPanel(view) : null,
+      view.killConfirm ? killPanel(view) : null,
       // 底栏常驻（R25）：`上一题 / 计数 / 下一题`由 style.css 固定到屏幕底部
       el('div', { class: 'card-footer' }, [foot]),
     ]),
   ]);
+  // 答题卡（US-36 / §2.11.9）：叠在题卡之上的一层遮罩 + 整份题号网格
+  if (view.sheet) screen.appendChild(renderSheet(view.sheet));
   // 左右滑动切题（R26）：与「上一题 / 下一题」同一条路径（`move(app, ±1)`，先取消已排程的自动前进）
   attachSwipe(screen, { onPrev: view.onPrev, onNext: view.onNext });
   clear(container);
   add(container, screen);
+}
+
+/** 题型分布文案（US-38）：`N 题 · 单选 a · 多选 b · 判断 c · 填空 d · 简答 e`（不足显 0）。 */
+function distributionText(dist, total) {
+  return `${total} 题 · 单选 ${dist.single} · 多选 ${dist.multi} · 判断 ${dist.judge}`
+    + ` · 填空 ${dist.fill} · 简答 ${dist.essay}`;
+}
+
+/**
+ * 完成态面板（US-37 / AC-50）：三项 = 本轮池大小 / 答对 / 答错；Z > 0 才出现「继续刷本组错题（Z 题）」；
+ * Z = 0 只显「本组全部答对」+ 重刷本组 / 回首页。
+ */
+function roundPanel(view) {
+  const round = view.round || { total: 0, correct: 0, wrong: 0 };
+  const nodes = [el('p', {
+    class: 'round-line',
+    text: round.wrong > 0
+      ? `本组 ${round.total} 题 · 答对 ${round.correct} · 答错 ${round.wrong}`
+      : '本组全部答对',
+  })];
+  if (round.wrong > 0) {
+    nodes.push(el('button', {
+      class: 'btn btn-primary round-next',
+      type: 'button',
+      text: `继续刷本组错题（${round.wrong} 题）`,
+      on: { click: view.onContinueRound },
+    }));
+  }
+  nodes.push(el('div', { class: 'actions' }, [
+    el('button', { class: 'btn round-restart', type: 'button', text: '重刷本组', on: { click: view.onRestartRound } }),
+    el('button', { class: 'btn round-home', type: 'button', text: '回首页', on: { click: view.onHome } }),
+  ]));
+  return el('section', { class: 'round-panel completed-panel', dataset: { completedPanel: 'true' } }, nodes);
 }
 
 /**
@@ -2653,7 +3223,7 @@ function judgeClass(picked, value, answerJudge) {
   return classes.join(' ');
 }
 
-__MODULES__["src/ui/card.mjs"] = { renderCard: renderCard, answerBlock: answerBlock, judgeRow: judgeRow, renderOptions: renderOptions };
+__MODULES__["src/ui/card.mjs"] = { renderCard: renderCard, distributionText: distributionText, answerBlock: answerBlock, judgeRow: judgeRow, renderOptions: renderOptions };
 }());
 (function () {
 // 字号三档与宽屏判定（设计档 §2.19 / R31 / R32）。
@@ -2738,16 +3308,26 @@ const EXAM_STATE_VERSION = 1;
 /** 抽题池排除的数据标记（D7 不猜：这三类无法可靠判分）。 */
 const EXAM_EXCLUDED_MARKS = ['noAnswer', 'suspect', 'outOfRange'];
 
-/** 某题型的抽题池 = 该题型中 marks 不含排除标记的题（§2.11.8 ①）。 */
-function poolFor(questions, type) {
-  return (questions || []).filter((question) => question.type === type
-    && !EXAM_EXCLUDED_MARKS.some((mark) => (question.marks || []).indexOf(mark) >= 0));
+/**
+ * 某题型的抽题池 = 该题型中 marks 不含排除标记、且未被斩掉的题（§2.11.8 ① / §2.11.10）。
+ * 返回 `[{ id, index }]`（`index` = 源表下标，供卷面「源内序」还原）。
+ */
+function poolFor(questions, type, killed) {
+  const dead = killed instanceof Set ? killed : new Set(killed || []);
+  const pool = [];
+  (questions || []).forEach((question, index) => {
+    if (question.type !== type) return;
+    if (dead.has(question.id)) return;
+    if (EXAM_EXCLUDED_MARKS.some((mark) => (question.marks || []).indexOf(mark) >= 0)) return;
+    pool.push({ id: question.id, index });
+  });
+  return pool;
 }
 
-/** 抽题池合计（入口 disabled 判据：合计 0 → 入口禁用，§2.11.8 ②）。 */
-function examPoolTotal(questions) {
+/** 抽题池合计（入口 disabled 判据：合计 0 → 入口禁用，§2.11.8 ②）；已斩题不计数。 */
+function examPoolTotal(questions, killed) {
   let total = 0;
-  for (const [type] of EXAM_PLAN) total += poolFor(questions, type).length;
+  for (const [type] of EXAM_PLAN) total += poolFor(questions, type, killed).length;
   return total;
 }
 
@@ -2768,21 +3348,49 @@ function hasAnswer(question, response) {
 }
 
 /**
+ * 「我的作答」展示文案（§2.11.14 核对区）：单选 / 多选 = 字母；判断 = 正确 / 错误；
+ * 填空 = 各空原文；简答 = 用户原文；无作答 = 「未答」（原文一律不归一化）。
+ */
+function describeResponse(question, response) {
+  if (!question || !hasAnswer(question, response)) return '未答';
+  if (question.type === 'single') return String(response.letter);
+  if (question.type === 'multi') return response.letters.join('');
+  if (question.type === 'judge') return response.judge === 'correct' ? '正确' : '错误';
+  if (question.type === 'fill') {
+    return response.values
+      .map((value) => String(value === undefined || value === null ? '' : value).trim())
+      .filter((value) => value !== '')
+      .join(' / ');
+  }
+  return String(response.text);
+}
+
+/**
+ * 卷面已作答的 qid 集合（US-36 / §2.11.9 考试面）：答题卡只标「已答 / 未答」，不出现对错（KD-30）。
+ * `questions` 供 hasAnswer 判题型（填空需逐空、简答需去空白）。
+ */
+function answeredQids(questions, paper, answers) {
+  const byId = new Map((questions || []).map((question) => [question.id, question]));
+  const replies = answers || {};
+  const out = new Set();
+  for (const qid of (paper && paper.qids) || []) {
+    if (hasAnswer(byId.get(qid), replies[qid])) out.add(qid);
+  }
+  return out;
+}
+
+
+/**
  * 抽题（§2.11.8 ①，写死）：逐题型做部分 Fisher–Yates 选前 k 题（k = min(配比, 池大小)，k ≥ n 时全取）；
  * 随机只决定「抽哪些」——卷面顺序恒为 EXAM_PLAN 题型序 → 同题型源表序（AC-40）。
  */
-function drawExam(questions, random) {
+function drawExam(questions, random, killed) {
   const pick = typeof random === 'function' ? random : Math.random;
   const qids = [];
   const perType = {};
   const missing = {};
   for (const [type, quota] of EXAM_PLAN) {
-    const pool = [];
-    (questions || []).forEach((question, index) => {
-      if (question.type !== type) return;
-      if (EXAM_EXCLUDED_MARKS.some((mark) => (question.marks || []).indexOf(mark) >= 0)) return;
-      pool.push({ id: question.id, index });
-    });
+    const pool = poolFor(questions, type, killed); // 单一池判据（§2.11.10）；抽完按源内序还原卷面顺序
     const count = Math.min(quota, pool.length);
     for (let i = 0; i < count; i += 1) {
       const j = i + Math.floor(pick() * (pool.length - i));
@@ -2850,20 +3458,140 @@ function formatRemaining(ms) {
   return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
 }
 
-__MODULES__["src/core/exam.mjs"] = { poolFor: poolFor, examPoolTotal: examPoolTotal, hasAnswer: hasAnswer, drawExam: drawExam, scoreExam: scoreExam, pendingEssayIndexes: pendingEssayIndexes, formatRemaining: formatRemaining, EXAM_PLAN: EXAM_PLAN, EXAM_TOTAL: EXAM_TOTAL, EXAM_DURATION_MS: EXAM_DURATION_MS, EXAM_TICK_MS: EXAM_TICK_MS, EXAM_STATE_VERSION: EXAM_STATE_VERSION, EXAM_EXCLUDED_MARKS: EXAM_EXCLUDED_MARKS };
+__MODULES__["src/core/exam.mjs"] = { poolFor: poolFor, examPoolTotal: examPoolTotal, hasAnswer: hasAnswer, describeResponse: describeResponse, answeredQids: answeredQids, drawExam: drawExam, scoreExam: scoreExam, pendingEssayIndexes: pendingEssayIndexes, formatRemaining: formatRemaining, EXAM_PLAN: EXAM_PLAN, EXAM_TOTAL: EXAM_TOTAL, EXAM_DURATION_MS: EXAM_DURATION_MS, EXAM_TICK_MS: EXAM_TICK_MS, EXAM_STATE_VERSION: EXAM_STATE_VERSION, EXAM_EXCLUDED_MARKS: EXAM_EXCLUDED_MARKS };
+}());
+(function () {
+// 考试结果页 + 逐题核对与两个动作（US-33 / §2.11.14 / KD-42 / KD-43）。
+// 迁移自 exam.mjs 的 resultPage / resultRow（宿主 398 / 上限 400 无余量），并在新文件里扩出核对区。
+// 只读面：核对与两个动作不改变本场总分 / 正确率；「加入错题本」是考试面对 KD-31 的唯一例外，
+// 只写 wrongbook.qids、不计错次；「斩掉这题」走 §2.11.10 的二次确认；结果不持久化、exam:current 不被写。
+const { TYPE_LABELS } = __MODULES__["src/core/detect.mjs"];
+const { describeResponse, scoreExam } = __MODULES__["src/core/exam.mjs"];
+const { displayText } = __MODULES__["src/core/grade.mjs"];
+const { addWrong } = __MODULES__["src/core/progress.mjs"];
+const { el } = __MODULES__["src/ui/dom.mjs"];
+const { killPanel, killQuestion } = __MODULES__["src/ui/killed.mjs"];
+const { persistWrongbook } = __MODULES__["src/ui/session.mjs"];
+
+const OUTCOME_LABELS = { correct: '答对', wrong: '答错', blank: '未答', pending: '未评' };
+/** 简答行的结论文案（US-33 / AC-51）：会了 / 不会 / 未自评（会了 ↔ 答对、不会 ↔ 答错、未自评 ↔ 未答）。 */
+const ESSAY_LABELS = { correct: '会了', wrong: '不会', blank: '未自评', pending: '未自评' };
+
+function span(className, text) { return el('span', { class: className, text }); }
+function btn(className, text, onClick, extra) {
+  return el('button', Object.assign({ class: `btn ${className}`, type: 'button', text, on: { click: onClick } }, extra || {}));
+}
+
+/** 本页的本地状态（只活在本会话里）：已加入错题本的题 + 已在结果页斩掉的题 + 待确认的斩题行。 */
+function resultState(flow) {
+  if (!flow.state.result) flow.state.result = { added: new Set(), killed: new Set(), confirm: null };
+  return flow.state.result;
+}
+
+async function addToWrongbook(app, flow, qid) {
+  const state = resultState(flow);
+  if (app.wrong.has(qid)) return; // 已在错题本：不重复、不报错
+  app.wrong = addWrong(app.wrong, qid); // 只写 qids、不计错次（KD-43 / US-17 口径）
+  await persistWrongbook(app);
+  state.added.add(qid);
+  flow.refresh();
+}
+
+async function confirmKill(app, flow, qid) {
+  const state = resultState(flow);
+  state.confirm = null;
+  await killQuestion(app, qid);
+  state.killed.add(qid);
+  flow.refresh();
+}
+
+/** 结果页（§2.11.8 ⑧ + §2.11.14）：总分 / 正确率 / 逐题对错 / 错题清单 / 逐题核对 / 动作。 */
+function resultPage(app, flow) {
+  const state = flow.state;
+  const rst = resultState(flow);
+  const result = scoreExam((app.bank && app.bank.questions) || [], state.paper, state.answers, state.selfAssess);
+  const percent = result.total > 0 ? Math.round((result.score / result.total) * 100) : 0;
+  const wrongRows = result.rows.filter((row) => row.outcome === 'wrong' || row.outcome === 'blank');
+  const list = el('ol', { class: 'exam-list exam-result-list' }, result.rows.map((row, index) => resultRow(app, row, index)));
+  const wrongList = wrongRows.length > 0
+    ? el('ol', { class: 'exam-list exam-wrong-list' }, wrongRows.map((row) => resultRow(app, row, result.rows.indexOf(row))))
+    : el('p', { class: 'empty exam-no-wrong', text: '本次没有错题' });
+  const actions = el('div', { class: 'actions' }, [
+    btn('btn-primary exam-retry', '再考一次', () => flow.retry()),
+    btn('exam-home', '返回首页', () => flow.home()),
+  ]);
+  const review = el('ol', { class: 'review-list' }, result.rows.map((row, index) => reviewRow(app, flow, row, index, rst)));
+  return [
+    el('h1', { class: 'app-title', text: '考试结果' }), el('p', { class: 'exam-score', text: `得分 ${result.score} / ${result.total}` }),
+    el('p', { class: 'exam-accuracy', text: `正确率 ${percent}%` }), el('h2', { class: 'exam-list-title', text: '逐题对错' }), list,
+    el('h2', { class: 'exam-list-title', text: '错题清单' }), wrongList, actions,
+    el('h2', { class: 'exam-list-title', text: '逐题核对' }), review,
+  ];
+}
+
+/** 逐题对错 / 错题清单的一行（004 既有结构，本批不改）。 */
+function resultRow(app, row, index) {
+  const question = app.questionIndex.get(row.qid);
+  return el('li', { class: `exam-row exam-row-${row.outcome}` }, [
+    span('exam-row-index', `${index + 1}`),
+    span('exam-row-type', question ? (TYPE_LABELS[question.type] || question.type) : ''),
+    span('exam-row-source', question ? question.sourceRow : row.qid),
+    span(`exam-row-outcome outcome-${row.outcome}`, OUTCOME_LABELS[row.outcome] || row.outcome),
+  ]);
+}
+
+/** 核对区一行（§2.11.14）：题干 / 我的作答 / 正确答案 / 三态结论 + 两个动作。 */
+function reviewRow(app, flow, row, index, rst) {
+  const question = app.questionIndex.get(row.qid);
+  if (!question) return el('li', { class: 'review-row' }, [span('review-stem', row.qid)]);
+  const killed = rst.killed.has(row.qid);
+  const inBook = app.wrong.has(row.qid) || rst.added.has(row.qid);
+  const conclusion = question.type === 'essay'
+    ? ESSAY_LABELS[row.outcome] || '未自评'
+    : OUTCOME_LABELS[row.outcome] || row.outcome;
+  const nodes = [
+    el('div', { class: 'review-head' }, [
+      span('review-index', `${index + 1}`),
+      span('review-type', TYPE_LABELS[question.type] || question.type),
+      span('review-source', question.sourceRow),
+      span(`review-outcome outcome-${row.outcome}`, conclusion),
+      killed ? span('review-killed-tag', '已斩') : null,
+    ]),
+    el('p', { class: 'review-stem', text: question.stem }),
+    el('p', { class: 'review-mine', text: `我的作答：${describeResponse(question, (flow.state.answers || {})[row.qid])}` }),
+    el('p', { class: 'review-answer', text: `正确答案：${displayText(question)}` }),
+  ];
+  nodes.push(el('div', { class: 'review-actions' }, [
+    btn(inBook ? 'review-added' : 'btn-primary review-add', inBook ? '已在错题本' : '加入错题本',
+      () => addToWrongbook(app, flow, row.qid), { disabled: inBook }),
+    btn('review-kill', '斩掉这题', () => { rst.confirm = row.qid; flow.refresh(); }, { disabled: killed }),
+  ]));
+  if (rst.confirm === row.qid) {
+    nodes.push(killPanel({
+      text: '斩掉这题？斩掉后本题不再出现在任何入口与考试抽题里（可在首页恢复）。',
+      onConfirmKill: () => confirmKill(app, flow, row.qid),
+      onCancelKill: () => { rst.confirm = null; flow.refresh(); },
+    }));
+  }
+  return el('li', { class: `review-row${killed ? ' review-killed' : ''}` }, nodes);
+}
+
+__MODULES__["src/ui/exam-result.mjs"] = { resultPage: resultPage };
 }());
 (function () {
 // 模拟考试流程控制器与渲染（设计档 §2.11.8 / KD-29–KD-33 / §2.13.1）：抽题与计分在 core/exam.mjs，
 // 题目部件复用 card.mjs 的导出；注入 app.timers / app.nowMs / app.random（测试可确定性推进）。
+// 006：结果页（含逐题核对与两个动作）迁出到 exam-result.mjs；答题页进度条可点开答题卡（US-36）。
 const { blankCountOf } = __MODULES__["src/core/answers.mjs"];
 const { TYPE_LABELS } = __MODULES__["src/core/detect.mjs"];
-const { drawExam, EXAM_DURATION_MS, EXAM_PLAN, EXAM_STATE_VERSION, EXAM_TICK_MS, EXAM_TOTAL, formatRemaining, hasAnswer, pendingEssayIndexes, scoreExam } = __MODULES__["src/core/exam.mjs"];
+const { answeredQids, drawExam, EXAM_DURATION_MS, EXAM_PLAN, EXAM_STATE_VERSION, EXAM_TICK_MS, EXAM_TOTAL, formatRemaining, hasAnswer, pendingEssayIndexes } = __MODULES__["src/core/exam.mjs"];
 const { answerBlock, judgeRow, renderOptions } = __MODULES__["src/ui/card.mjs"];
+const { resultPage } = __MODULES__["src/ui/exam-result.mjs"];
 const { TYPE_LABELS: SHORT_TYPE_LABELS } = __MODULES__["src/core/progress.mjs"];
 const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
+const { examSheetCells, releaseSheetEscape, renderSheet } = __MODULES__["src/ui/sheet.mjs"];
 
 const EXAM_KEY = 'exam:current';
-const OUTCOME_LABELS = { correct: '答对', wrong: '答错', blank: '未答', pending: '未评' };
 function btn(className, text, onClick, extra) {
   return el('button', Object.assign({ class: `btn ${className}`, type: 'button', text, on: { click: onClick } }, extra || {}));
 }
@@ -2892,10 +3620,12 @@ function createExamFlow(options) {
   const state = {
     phase: 'loading', paper: null, answers: {}, selfAssess: {}, index: 0, startedAt: 0, deadline: 0,
     assessIndex: 0, saved: null, tick: null, confirm: false, notice: null, saveError: false,
+    sheetOpen: false, result: null,
   };
   const flow = { state, liveInputs: [], refs: {} };
   Object.assign(flow, {
     render: (root) => renderExam(root, app, flow),
+    refresh: () => refresh(app, flow), // 结果页的动作重画（核对区 / 两个动作）
     startNew: () => { startExam(app, flow); refresh(app, flow); }, // 重新开始 / 再考一次
     continueSaved: () => resumeSaved(app, flow),
     pick: (payload) => pickAnswer(app, flow, payload),
@@ -2907,6 +3637,10 @@ function createExamFlow(options) {
     cancelSubmit: () => { state.confirm = false; refresh(app, flow); },
     confirmSubmit: () => submitExam(app, flow),
     assess: (correct) => assessEssay(app, flow, correct),
+    // 答题卡（US-36 / §2.11.9 考试面）：进度条可点开整份网格；跳题只移游标、不写作答记录
+    openSheet: () => { state.sheetOpen = true; refresh(app, flow); },
+    closeSheet: () => { state.sheetOpen = false; refresh(app, flow); },
+    jumpTo: (index) => jumpSheet(app, flow, index),
   });
   flow.retry = flow.startNew;
   return flow;
@@ -2915,11 +3649,12 @@ function createExamFlow(options) {
 /** 抽题开考（新的一卷）：配比走 EXAM_PLAN；池空 → 空态（不白屏）。 */
 function startExam(app, flow) {
   const state = flow.state;
-  const paper = drawExam((app.bank && app.bank.questions) || [], app.random);
+  const paper = drawExam((app.bank && app.bank.questions) || [], app.random, app.killed);
   const startedAt = app.nowMs();
   Object.assign(state, {
     paper: { qids: paper.qids, total: paper.total }, saved: null, answers: {}, selfAssess: {}, index: 0,
     assessIndex: 0, confirm: false, saveError: false, startedAt, deadline: startedAt + EXAM_DURATION_MS,
+    sheetOpen: false, result: null,
   });
   stopTick(app, state);
   if (paper.total === 0) { state.phase = 'empty'; clearRecord(app); return; } // 极端空卷 → 空态 + 返回入口
@@ -2963,6 +3698,16 @@ function moveCursor(app, flow, delta) {
   refresh(app, flow);
   persistExam(app, flow); // 每次换题
 }
+
+/** 答题卡跳题（US-36 / §2.11.9）：关闭网格 + 绝对定位；只移游标，不改作答记录与判分状态。 */
+function jumpSheet(app, flow, index) {
+  const state = flow.state;
+  if (state.phase !== 'answering' || !state.paper) return;
+  collectCurrent(app, flow); // 正在输入的填空 / 简答先收口——不丢用户已打的字
+  state.sheetOpen = false;
+  if (index >= 0 && index < state.paper.total) Object.assign(state, { index, confirm: false });
+  refresh(app, flow);
+}
 function pickAnswer(app, flow, payload) {
   const state = flow.state;
   const question = state.phase === 'answering' ? currentQuestion(app, flow, state.index) : null;
@@ -3001,7 +3746,7 @@ function submitExam(app, flow) {
   if (state.phase !== 'answering') return;
   collectCurrent(app, flow); // ① 收集当前题输入（正在填空 / 简答也不例外）
   stopTick(app, state); // ② 停表
-  state.confirm = false;
+  state.confirm = false; state.sheetOpen = false; releaseSheetEscape(); // 交卷：收起答题卡（§2.11.9 网格只属于「考试中」）
   const pending = pendingEssays(app, state); // ③ 判分在 scoreExam（纯函数，结果页取用）
   if (pending.length === 0) { finishExam(app, flow); return; } // ⑤ 无简答待自评 → 结果页
   // ④ 有「已作答的简答」→ 自评收尾（未作答的简答不进自评，直接算未答）
@@ -3037,6 +3782,7 @@ function exitExam(app, flow, render, save) {
     app.notice = '本次考试已保存，可稍后继续';
   }
   stopTick(app, state);
+  releaseSheetEscape(); // 离开考试面：摘掉答题卡的 Esc 监听（不留悬挂回调）
   app.exam = null;
   app.view = 'matrix';
   render(app);
@@ -3109,6 +3855,12 @@ function renderExam(root, app, flow) {
   else nodes = resultPage(app, flow);
   const screen = el('main', { class: 'screen exam-screen' });
   for (const node of nodes) screen.appendChild(node);
+  // 答题卡（US-36）：遮罩 + 整份题号网格（考试中只标已答 / 未答；KD-30）
+  if (state.sheetOpen && state.paper) screen.appendChild(renderSheet({
+    title: '答题卡',
+    cells: examSheetCells(state.paper.qids, answeredQids((app.bank && app.bank.questions) || [], state.paper, state.answers)),
+    onJump: flow.jumpTo, onClose: flow.closeSheet,
+  }));
   add(root, screen);
 }
 /** 续考询问页（§2.11.8 ⑦）：继续考试 / 重新开始（放弃上次）。 */
@@ -3128,7 +3880,7 @@ function answeringPage(app, flow) {
   const state = flow.state;
   const question = currentQuestion(app, flow, state.index);
   flow.refs.remaining = span('exam-remaining', '');
-  flow.refs.progress = span('exam-progress', '');
+  flow.refs.progress = btn('exam-progress', '', () => flow.openSheet()); // 进度条可点：打开答题卡（US-36）
   const nodes = [el('header', { class: 'exam-top' }, [flow.refs.remaining, flow.refs.progress, btn('btn-ghost exam-exit', '退出', () => flow.exit())])];
   if (state.notice) nodes.push(el('p', { class: 'banner banner-warn exam-notice', text: state.notice }));
   if (state.saveError) nodes.push(el('p', { class: 'banner banner-warn exam-save-warn', text: '本次进度可能未保存' }));
@@ -3221,32 +3973,6 @@ function assessPage(app, flow) {
     btn('btn-ghost exam-exit', '退出', () => flow.exit()),
   ]);
   return [head, questionCard(question, [mine, answerBlock(question), assess])];
-}
-/** 结果页（§2.11.8 ⑧）：总分 + 正确率 + 逐题对错 + 错题清单 + 再考一次 / 返回首页。 */
-function resultPage(app, flow) {
-  const state = flow.state;
-  const result = scoreExam((app.bank && app.bank.questions) || [], state.paper, state.answers, state.selfAssess);
-  const percent = result.total > 0 ? Math.round((result.score / result.total) * 100) : 0;
-  const wrongRows = result.rows.filter((row) => row.outcome === 'wrong' || row.outcome === 'blank');
-  const list = el('ol', { class: 'exam-list exam-result-list' }, result.rows.map((row, index) => resultRow(app, row, index)));
-  const wrongList = wrongRows.length > 0
-    ? el('ol', { class: 'exam-list exam-wrong-list' }, wrongRows.map((row) => resultRow(app, row, result.rows.indexOf(row))))
-    : el('p', { class: 'empty exam-no-wrong', text: '本次没有错题' });
-  const actions = el('div', { class: 'actions' }, [btn('btn-primary exam-retry', '再考一次', () => flow.retry()), btn('exam-home', '返回首页', () => flow.home())]);
-  return [
-    el('h1', { class: 'app-title', text: '考试结果' }), el('p', { class: 'exam-score', text: `得分 ${result.score} / ${result.total}` }),
-    el('p', { class: 'exam-accuracy', text: `正确率 ${percent}%` }), el('h2', { class: 'exam-list-title', text: '逐题对错' }), list,
-    el('h2', { class: 'exam-list-title', text: '错题清单' }), wrongList, actions,
-  ];
-}
-function resultRow(app, row, index) {
-  const question = app.questionIndex.get(row.qid);
-  return el('li', { class: `exam-row exam-row-${row.outcome}` }, [
-    span('exam-row-index', `${index + 1}`),
-    span('exam-row-type', question ? (TYPE_LABELS[question.type] || question.type) : ''),
-    span('exam-row-source', question ? question.sourceRow : row.qid),
-    span(`exam-row-outcome outcome-${row.outcome}`, OUTCOME_LABELS[row.outcome] || row.outcome),
-  ]);
 }
 
 __MODULES__["src/ui/exam.mjs"] = { openExam: openExam, createExamFlow: createExamFlow };
@@ -3653,81 +4379,59 @@ function errorMessage(err) {
 __MODULES__["src/ui/import.mjs"] = { createImportFlow: createImportFlow, countRoles: countRoles };
 }());
 (function () {
-// 入口 / 组的视图模型 —— 由 app 状态派生「这组有多少题、什么顺序、空态说什么」
-// （设计档 §2.11.1 / §2.11.5 / §2.11.6）。由 app.mjs 迁出，守 N8 行数纪律；纯读，不改状态。
+// 错题本的两个手动动作（US-8 / OQ-2 / R17）：移出本题 · 清空已掌握——纯搬迁自 app.mjs（N8 行数纪律）。
+// 两者在删 `qids` 的同时删 `counts` 键（不留孤儿计数）；移出后重算组序与游标，游标落到相邻题。
+// 依赖的 app 级动作（取消排程 / 复位 / 重画）由调用方以 ctx 注入，本模块不反向依赖 app.mjs。
 
-const { accuracy, groupKey, isCollection, masteryOf, masterySummary, selectQuestions, selectUnmastered, shuffledOrder, WRONGBOOK, wrongbookOrderByWeight } = __MODULES__["src/core/progress.mjs"];
+const { cursorIndex, removeWrong } = __MODULES__["src/core/progress.mjs"];
+const { currentMastery, orderFor } = __MODULES__["src/ui/groups.mjs"];
+const { persistWrongbook } = __MODULES__["src/ui/session.mjs"];
 
-function uiFlag(app, key) {
-  return !!(app.uiState && app.uiState[key]);
+/** 移出本题：从错题本删该题（含错次），重算组序并定位（被删的是当前题 → 落到相邻题 / 空态）。 */
+async function removeFromWrongbook(app, ctx) {
+  ctx.cancelAdvance(app);
+  const qid = app.order[app.index];
+  if (!qid) return;
+  app.wrong = removeWrong(app.wrong, qid);
+  const counts = { ...app.wrongCounts }; // 移出时同步删错次，不留孤儿计数（R17）
+  delete counts[qid];
+  app.wrongCounts = counts;
+  await persistWrongbook(app);
+  app.round = ctx.dropFromRound(app.round, qid); // 轮次题池同步收敛（与斩题同一语义，§2.11.12）
+  // 重练轮只从本轮题池剔除（可见题组 = 本轮题池）；第 1 轮按整组重算（与斩题路径同口径）
+  app.order = app.roundReplay
+    ? app.order.filter((id) => id !== qid)
+    : orderFor(app, app.group.mode, app.group.type);
+  app.index = cursorIndex(app.order, app.progress ? app.progress.cursorQid : null);
+  if (app.index >= app.order.length) app.index = Math.max(0, app.order.length - 1);
+  ctx.resetQuestionState(app);
+  ctx.render(app);
 }
 
-/** 乱序种子：未生成过（仍为 0）时同种子同序，仍确定（R20）。 */
-function seedOf(app) {
-  const seed = app.uiState ? app.uiState.shuffleSeed : null;
-  return typeof seed === 'number' ? seed : 0;
-}
-
-function progressList(app) {
-  return Array.from(app.progressCache.values());
-}
-
-/** 掌握度聚合口径：跨【全部已存进度组】，含两个集合型组（§2.11.6①）。 */
-function currentMastery(app) {
-  return masteryOf((app.bank && app.bank.questions) || [], progressList(app));
-}
-
-/** 入口 meta 的原料：背题 = 正确率；练习 6 组 = 掌握度三分；集合型 = 题数。 */
-function groupSummary(app, mode, type) {
-  const questions = (app.bank && app.bank.questions) || [];
-  if (!app.bank) {
-    if (isCollection(type)) return { total: 0 };
-    return mode === 'practice'
-      ? { total: 0, mastery: { total: 0, mastered: 0, failed: 0, untrained: 0 } }
-      : { total: 0, accuracy: null };
+/** 清空已掌握：把已掌握的题从错题本移出（含错次），未掌握的留着。 */
+async function clearMastered(app, ctx) {
+  ctx.cancelAdvance(app);
+  if (!app.store) return;
+  const mastery = currentMastery(app);
+  const counts = { ...app.wrongCounts };
+  for (const qid of Array.from(app.wrong)) {
+    if (mastery.get(qid) !== 'mastered') continue;
+    app.wrong = removeWrong(app.wrong, qid);
+    delete counts[qid];
   }
-  if (isCollection(type)) return { total: orderFor(app, mode, type).length };
-  const selected = selectQuestions(questions, mode, type, app.wrong);
-  if (mode === 'practice') {
-    return { total: selected.length, mastery: masterySummary(selected, progressList(app)) };
-  }
-  const progress = app.progressCache.get(groupKey(mode, type));
-  return { total: selected.length, accuracy: progress ? accuracy(progress) : null };
+  app.wrongCounts = counts;
+  await persistWrongbook(app);
+  ctx.render(app);
 }
 
-/** 该入口的题目顺序（源表序为底；练习 6 组可叠加「只练没掌握的」与「乱序」）。 */
-function orderFor(app, mode, type) {
-  const questions = (app.bank && app.bank.questions) || [];
-  if (mode === 'practice' && type === WRONGBOOK) {
-    // 错题本 = 错次降序、平手按源表下标升序（R17），不洗牌、不受开关影响
-    return wrongbookOrderByWeight(questions.map((q) => q.id), app.wrong, app.wrongCounts);
-  }
-  if (isCollection(type)) return selectQuestions(questions, mode, type, app.wrong).map((q) => q.id);
-  let selected = selectQuestions(questions, mode, type, app.wrong);
-  if (mode !== 'practice') return selected.map((q) => q.id);
-  if (uiFlag(app, 'practiceUnmasteredOnly')) selected = selectUnmastered(selected, currentMastery(app));
-  let ids = selected.map((q) => q.id);
-  if (uiFlag(app, 'practiceShuffled')) ids = shuffledOrder(ids, seedOf(app));
-  return ids;
-}
-
-/** 过滤后为空的练习组要说明「都掌握了」，不是「没有题目」（§2.11.5）。 */
-function emptyTextFor(app) {
-  if (!app.bank || !app.group || app.order.length > 0) return null;
-  const { mode, type } = app.group;
-  if (mode !== 'practice' || isCollection(type) || !uiFlag(app, 'practiceUnmasteredOnly')) return null;
-  const selected = selectQuestions(app.bank.questions, mode, type, app.wrong);
-  return selected.length > 0 ? '这一组的题都已掌握 —— 没有需要重练的题。' : null;
-}
-
-__MODULES__["src/ui/groups.mjs"] = { uiFlag: uiFlag, seedOf: seedOf, currentMastery: currentMastery, groupSummary: groupSummary, orderFor: orderFor, emptyTextFor: emptyTextFor };
+__MODULES__["src/ui/wrongbook-ops.mjs"] = { removeFromWrongbook: removeFromWrongbook, clearMastered: clearMastered };
 }());
 (function () {
-// 入口矩阵与统计（设计档 §2.11.1 / §2.11.6：14 个入口 + 掌握度 meta + 两个开关）。
-// R6 / R8 / R9 / R16 / R18 / R20。
+// 入口矩阵与统计（设计档 §2.11.1 / §2.11.6 / §2.11.11 / §2.11.13：15 个入口 + 掌握度 meta + 三个集合型入口 + 两个开关）。
+// R6 / R8 / R9 / R16 / R18 / R20 / US-34 / US-35 / US-38。
 
 const { EXAM_DURATION_MS, EXAM_TOTAL, examPoolTotal } = __MODULES__["src/core/exam.mjs"];
-const { isCollection, MEMORIZE_TYPES, MODE_LABELS, NUMBERS, PRACTICE_TYPES, TYPE_LABELS, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
+const { isCollection, MEMORIZE_TYPES, MODE_LABELS, NUMBERS, PRACTICE_TYPES, TYPE_LABELS, WEAK, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
 const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
 const { FONT_LABELS } = __MODULES__["src/ui/font.mjs"];
 
@@ -3749,7 +4453,7 @@ function shouldShowInstallHint(ui) {
 }
 
 /**
- * 渲染入口矩阵（背题 × 6 + 练习 × 6 + 错题本 + 数字专项 = 14 组）。
+ * 渲染入口矩阵（背题 × 6 + 练习 × 6 + 错题本 + 数字专项 + 易错题 = 15 组）。
  * @param {HTMLElement} container
  * @param {object} view
  */
@@ -3819,7 +4523,7 @@ function renderEntryMatrix(container, view) {
   }
 
   // R27 / R29（§2.11.1 / KD-27）：区块顺序 = 练习区 → 模拟考试 → 背题区；
-  // 「模拟考试」为独立区块，不计入 14 个入口（§2.11.8 入口与位次）。
+   // 「模拟考试」为独立区块，不计入 15 个入口（§2.11.8 入口与位次）。
   for (const mode of ['practice', 'memorize']) {
     const group = el('section', { class: 'matrix-group', dataset: { mode } });
     group.appendChild(el('h2', { class: 'matrix-title', text: `${MODE_LABELS[mode]}　` }));
@@ -3835,7 +4539,7 @@ function renderEntryMatrix(container, view) {
       }));
     }
     group.appendChild(grid);
-    // 掌握度开关与两个集合型入口只挂在练习区（§2.11.1 / §2.11.4）
+    // 掌握度开关与三个集合型入口只挂在练习区（§2.11.1 / §2.11.4）
     if (mode === 'practice') group.appendChild(renderPracticeExtras(view));
     screen.appendChild(group);
     if (mode === 'practice') screen.appendChild(renderExamBlock(view)); // 练习区 → 模拟考试 → 背题区
@@ -3850,12 +4554,31 @@ function renderEntryMatrix(container, view) {
     }),
   ]));
 
+  // 「已斩题」区块（US-34 / KD-44）：入口矩阵的末块——背题区之后；前三块的 data-mode 序列一位不动
+  screen.appendChild(renderKilledBlock(view));
+
   add(container, screen);
+}
+
+/** 「已斩 N 题」= 末块（`data-killed-block` 供机检定位）；为空时按钮禁用并写明「暂无已斩题」。 */
+function renderKilledBlock(view) {
+  const count = (view.killed && typeof view.killed.size === 'number') ? view.killed.size : 0;
+  return el('section', { class: 'killed-block', dataset: { killedBlock: 'true' } }, [
+    el('h2', { class: 'matrix-title', text: `已斩 ${count} 题` }),
+    el('p', { class: 'matrix-hint', text: count > 0 ? '斩掉的题不再出现在任何入口；可逐题恢复或全部恢复。' : '暂无已斩题。' }),
+    el('button', {
+      class: 'btn killed-open',
+      type: 'button',
+      text: '查看 / 恢复',
+      disabled: count === 0,
+      on: { click: view.onOpenKilled },
+    }),
+  ]);
 }
 
 /**
  * 「模拟考试」独立区块（R29 / §2.11.8）：按钮类 `exam-entry`——**不带** `.entry` 类，
- * 14 个入口的计数断面与各条口径不变；抽题池合计 0（无题库 / 全被标记）时禁用。
+ * 15 个入口的计数断面与各条口径不变；抽题池合计 0（无题库 / 全被标记 / 全已斩）时禁用。
  */
 function renderExamBlock(view) {
   const questions = (view.bank && view.bank.questions) || [];
@@ -3866,7 +4589,7 @@ function renderExamBlock(view) {
       class: 'btn exam-entry',
       type: 'button',
       dataset: { examEntry: 'true' },
-      disabled: examPoolTotal(questions) === 0,
+      disabled: examPoolTotal(questions, view.killed) === 0,
       on: { click: () => view.onOpenExam() },
     }, [
       el('span', { class: 'entry-label', text: '开始考试' }),
@@ -3875,7 +4598,7 @@ function renderExamBlock(view) {
   ]);
 }
 
-/** 练习区附加区：两个开关 + 错题本（含清空已掌握）+ 数字专项。 */
+/** 练习区附加区：两个开关 + 错题本（含清空已掌握）+ 数字专项 + 易错题（第 15 个入口）。 */
 function renderPracticeExtras(view) {
   const extras = el('div', { class: 'practice-extras' });
   extras.appendChild(el('div', { class: 'switch-row' }, [
@@ -3900,6 +4623,12 @@ function renderPracticeExtras(view) {
     summary: view.summaryOf('practice', NUMBERS),
     onEnter: view.onEnter,
   }));
+  extras.appendChild(entryButton({
+    mode: 'practice',
+    type: WEAK,
+    summary: view.summaryOf('practice', WEAK),
+    onEnter: view.onEnter,
+  }));
   return extras;
 }
 
@@ -3922,7 +4651,7 @@ function isOn(view, key) {
 function entryButton(options) {
   const summary = options.summary || { total: 0, accuracy: null };
   const label = TYPE_LABELS[options.type] || options.type;
-  // 两个集合型入口即使为空也可进入 —— 进去看到的空态是 AC-16 要求的「明确呈现」
+  // 三个集合型入口即使为空也可进入 —— 进去看到的空态是 AC-16 要求的「明确呈现」
   const disabled = summary.total === 0 && !isCollection(options.type);
   return el('button', {
     class: `btn entry entry-${options.type}`,
@@ -3938,11 +4667,12 @@ function entryButton(options) {
 
 /**
  * 入口 meta：背题区「N 题 · 正确率」、练习 6 组「共 N 题 · 已掌握 a / 未掌握 b / 未练 c」、
- * 集合型入口「N 题」（§2.11.6①）。
+ * 错题本「N 题 · 五型分布」、易错题「易错 N 题」、数字专项「N 题」（§2.11.6① / §2.11.11 / §2.11.13）。
  */
 function entryMeta(summary, mode, type) {
+  if (type === WEAK) return `易错 ${summary.total} 题`;
+  if (isCollection(type)) return collectionMeta(summary, type);
   if (summary.total === 0) return '暂无题目';
-  if (isCollection(type)) return `${summary.total} 题`;
   if (mode === 'practice' && summary.mastery) {
     const mastery = summary.mastery;
     return `共 ${summary.total} 题 · 已掌握 ${mastery.mastered} / 未掌握 ${mastery.failed} / 未练 ${mastery.untrained}`;
@@ -3951,6 +4681,14 @@ function entryMeta(summary, mode, type) {
     ? '未开始'
     : `正确率 ${(summary.accuracy * 100).toFixed(0)}%`;
   return `${summary.total} 题 · ${accuracyText}`;
+}
+
+/** 集合型入口 meta：错题本多一段题型分布（空时不带分布串），其余维持「N 题」（§2.11.13）。 */
+function collectionMeta(summary, type) {
+  if (type !== WRONGBOOK || summary.total === 0 || !summary.distribution) return `${summary.total} 题`;
+  const dist = summary.distribution;
+  return `${summary.total} 题 · 单选 ${dist.single} · 多选 ${dist.multi} · 判断 ${dist.judge}`
+    + ` · 填空 ${dist.fill} · 简答 ${dist.essay}`;
 }
 
 // 入口矩阵的渲染到此为止：空态与矩阵两态都在上面处理。
@@ -3962,7 +4700,7 @@ __MODULES__["src/ui/stats.mjs"] = { shouldShowInstallHint: shouldShowInstallHint
 // 会话持久化与诊断字段在 session.mjs；纯逻辑在 core/。
 const { displayText, grade } = __MODULES__["src/core/grade.mjs"];
 const { inflateRaw, probeInflate } = __MODULES__["src/core/inflate.mjs"];
-const { accuracy, addWrong, bumpWrongCount, cursorIndex, ensureProgress, groupKey, recordAnswer, removeWrong, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
+const { addWrong, bumpWrongCount, markRound, recordAnswer, roundSummary, startRound } = __MODULES__["src/core/progress.mjs"];
 const { openStore } = __MODULES__["src/core/store.mjs"];
 const { adoptBank, loadBank } = __MODULES__["src/ui/bank-load.mjs"];
 const { renderCard } = __MODULES__["src/ui/card.mjs"];
@@ -3971,8 +4709,11 @@ const { currentFontLevel, cycleFontLevel } = __MODULES__["src/ui/font.mjs"];
 const { attachDoubleTapGuard } = __MODULES__["src/ui/gesture.mjs"];
 const { openExam } = __MODULES__["src/ui/exam.mjs"];
 const { createImportFlow } = __MODULES__["src/ui/import.mjs"];
-const { persistProgress, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
-const { currentMastery, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
+const { askKill, cancelKill, confirmKill, killedView, renderKilledPage } = __MODULES__["src/ui/killed.mjs"];
+const { releaseSheetEscape, sheetModel } = __MODULES__["src/ui/sheet.mjs"];
+const { clearMastered, removeFromWrongbook } = __MODULES__["src/ui/wrongbook-ops.mjs"];
+const { enterGroup, goTo, persistProgress, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
+const { cardView, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
 const { renderEntryMatrix } = __MODULES__["src/ui/stats.mjs"];
 
 /** 答对后停留时长（毫秒）：让用户看清对错再走（§2.11.3）。 */
@@ -4000,6 +4741,8 @@ async function mount(rootEl, options) {
     progressCache: new Map(),
     wrong: new Set(),
     wrongCounts: {},
+    killed: new Set(), // 已斩题（US-34）：只影响题目池，不动 progress / wrongbook / counts
+    round: null, roundReplay: false, sheetOpen: false, killConfirm: null, // 组内轮次 / 答题卡 / 斩题待确认 qid（均内存态）
     response: null, feedback: null, essayStage: 'write', essayDraft: '', completed: false,
     answerShown: false, // 背题延迟揭示（R24）：每题先给题干与选项原文，到点才置位
     feedbackHoldMs: typeof opts.feedbackHoldMs === 'number' ? opts.feedbackHoldMs : FEEDBACK_HOLD_MS,
@@ -4008,7 +4751,7 @@ async function mount(rootEl, options) {
     nowMs: typeof opts.now === 'function' ? opts.now : Date.now, // 考试计时注入缝（§2.4.2）
     random: typeof opts.random === 'function' ? opts.random : Math.random, // 考试抽题注入缝
     questionIndex: new Map(),
-    flow: null, exam: null, uiState: null, notice: null,
+    flow: null, exam: null, uiState: null, notice: null, noticeAt: null,
     importMs: 0, renderMs: 0, readyMs: 0,
   };
 
@@ -4027,11 +4770,23 @@ async function mount(rootEl, options) {
   return app;
 }
 
+/**
+ * 一次性提示（斩题 / 换表 / 考试已保存）的生命周期：只属于它首次出现的画面——换屏或换题即消退。
+ * 同一画面的重画保留（挂载时会画两遍，第二遍不能把它丢掉，否则换表提示一闪就没）。
+ */
+function syncNotice(app) {
+  const key = `${app.view}|${app.group ? app.group.groupKey : ''}|${app.order[app.index] || ''}`;
+  if (!app.notice) app.noticeAt = null;
+  else if (!app.noticeAt || app.noticeAt.text !== app.notice) app.noticeAt = { text: app.notice, key }; // 新提示起算
+  else if (app.noticeAt.key !== key) { app.notice = null; app.noticeAt = null; } // 换了画面 → 消退
+}
 
 function render(app) {
   const started = now();
+  syncNotice(app);
   if (app.view === 'import' && app.flow) app.flow.render(app.root);
   else if (app.view === 'exam' && app.exam) app.exam.render(app.root); // R29：考试面渲染分支
+  else if (app.view === 'killed') renderKilledPage(app.root, killedView(app, render)); // US-34 恢复面
   else if (app.view === 'card' && app.bank) renderQuestion(app);
   else renderMatrix(app);
   app.renderMs = Math.round(now() - started);
@@ -4045,10 +4800,12 @@ function renderMatrix(app) {
     inflateOk: app.inflate.ok,
     inflateReason: app.inflate.reason,
     summaryOf: (mode, type) => groupSummary(app, mode, type),
-    onEnter: (mode, type) => enterGroup(app, mode, type),
+    onEnter: (mode, type) => enterGroup(app, mode, type, APP_OPS),
     onImport: () => openImport(app),
     onOpenExam: () => { openExam(app, render); }, // R29：模拟考试入口（§2.11.8）
-    onClearMastered: () => clearMastered(app),
+    killed: app.killed, // US-34：「已斩 N 题」末块 + 考试池 disabled 判据
+    onOpenKilled: () => { app.view = 'killed'; render(app); },
+    onClearMastered: () => clearMastered(app, APP_OPS),
     onToggleUnmasteredOnly: () => toggleUnmasteredOnly(app),
     onToggleShuffled: () => toggleShuffled(app),
     fontLevel: currentFontLevel(), // R31（§2.19 B）：当前档（用户选择优先；无选择时宽屏默认「大」）
@@ -4059,29 +4816,17 @@ function renderMatrix(app) {
   });
 }
 
-async function enterGroup(app, mode, type) {
-  cancelAdvance(app);
-  const key = groupKey(mode, type);
-  let stored = app.progressCache.get(key) || null;
-  if (!stored && app.store) {
-    try { stored = await app.store.loadProgress(key); } catch (err) { stored = null; }
-  }
-  const progress = ensureProgress(stored, key);
-  app.progressCache.set(key, progress);
-  app.group = { mode, type, groupKey: key };
-  app.order = orderFor(app, mode, type);
-  app.progress = progress;
-  app.index = cursorIndex(app.order, progress.cursorQid);
-  resetQuestionState(app);
-  app.view = 'card';
-  render(app);
-}
+/** 宿主级动作（session.mjs 的进组 / 定位、killed.mjs 的取消斩题复用）：取消排程 · 复位题卡 · 重画 · 轮次题池收敛 · 背题揭示复排。 */
+const APP_OPS = { cancelAdvance, resetQuestionState, render, dropFromRound, scheduleReveal };
 
 /** 离开题卡 / 返回入口：先取消排程，再换屏（§2.11.3 排程取消不变量）。 */
 function exitGroup(app) {
   cancelAdvance(app);
   app.view = 'matrix';
   app.group = null;
+  app.round = null; // 离开面：轮次不保留（US-37 边界）
+  app.roundReplay = false; app.sheetOpen = false; app.killConfirm = null;
+  releaseSheetEscape(); // 离开题卡：摘掉答题卡的 Esc 监听（不留悬挂回调）
   render(app);
 }
 
@@ -4093,23 +4838,34 @@ function resetQuestionState(app) {
   app.essayDraft = '';
   app.completed = false;
   app.answerShown = false; // 每题重新起算（渲染侧 fail-closed：非 true 不显示答案）
+  app.killConfirm = null; // 换题即收起斩题确认面板（待确认的题随当前题作废）
   cancelAdvance(app);
   restoreAnsweredState(app); // R28：游标落在本组已作答题 → 重建已作答外观（只读、零副作用）
-  scheduleReveal(app);
+  // 本轮已全部作答 → 完成态面板到点重现；否则换题取消排程后，该轮面板永久缺失（§2.11.12）
+  if (app.group && app.group.mode === 'practice' && roundSummary(app.round).complete) scheduleComplete(app);
+  else scheduleReveal(app);
 }
 
 /**
  * R28（§2.11.3 第 12 条）：本组 `progress.response` 有该题 → 回看态（对错横幅 + 答案原文；
  * 简答 = 自评结果 + 参考答案原文）。只读——不写 `response` / `stats` / 错题本、不排程自动前进；
  * 未作答过（键缺）保持未作答态（fail-closed）；判据面 = 本组，不跨组借答案。
+ * 与组内轮次（US-37）的分工：除「继续刷本组错题 / 重刷本组」轮已作答的题外，重练轮里的题**可再作答**
+ * （否则续刷无法推进，也不会产生新的错次）；首次进组的轮次照旧回看。
  */
 function restoreAnsweredState(app) {
   if (!app.progress || !app.group || app.group.mode !== 'practice') return;
   const question = currentQuestion(app);
   if (!question) return;
-  const response = app.progress.response;
-  if (!response || !Object.prototype.hasOwnProperty.call(response, question.id)) return;
-  app.feedback = { correct: response[question.id] === true, expectedDisplay: displayText(question) };
+  if (app.roundReplay) {
+    // 重练轮（继续刷本组错题 / 重刷本组）：本轮尚未作答 → 可作答；已作答 → 回看**本轮**的对错
+    if (!app.round || !app.round.done.has(question.id)) return;
+    app.feedback = { correct: !app.round.wrong.has(question.id), expectedDisplay: displayText(question) };
+  } else {
+    const response = app.progress.response;
+    if (!response || !Object.prototype.hasOwnProperty.call(response, question.id)) return;
+    app.feedback = { correct: response[question.id] === true, expectedDisplay: displayText(question) };
+  }
   if (question.type === 'essay') app.essayStage = 'done';
 }
 
@@ -4119,58 +4875,39 @@ function currentQuestion(app) {
 }
 
 function renderQuestion(app) {
-  const question = currentQuestion(app);
-  renderCard(app.root, {
-    question,
-    mode: app.group.mode,
-    group: app.group,
-    index: app.index, total: app.order.length,
-    response: app.response, feedback: app.feedback,
-    essayStage: app.essayStage, essayDraft: app.essayDraft,
-    completed: app.completed, answerShown: app.answerShown, emptyText: emptyTextFor(app),
-    accuracy: app.progress ? accuracy(app.progress) : null,
-    answeredCount: app.progress ? app.progress.stats.attempts : 0,
-    canRemoveWrong: app.group.mode === 'practice' && app.group.type === WRONGBOOK,
+  renderCard(app.root, Object.assign(cardView(app), {
+    sheet: sheetModel(app, { onJump: (index) => jumpTo(app, index), onClose: () => closeSheet(app) }),
+    killConfirm: app.killConfirm,
     onExit: () => exitGroup(app),
     onPrev: () => move(app, -1), onNext: () => move(app, 1),
     onPick: (payload) => handlePick(app, payload),
     onSubmit: (payload) => resolveAnswer(app, payload),
     onEssaySubmit: (text) => submitEssay(app, text),
     onSelfAssess: (correct) => selfAssess(app, correct),
-    onRemoveWrong: () => removeFromWrongbook(app),
-  });
+    onRemoveWrong: () => removeFromWrongbook(app, APP_OPS),
+    onAskKill: () => askKill(app, APP_OPS), onCancelKill: () => cancelKill(app, APP_OPS),
+    onConfirmKill: () => confirmKill(app, APP_OPS),
+    onOpenSheet: () => openSheet(app),
+    onContinueRound: () => continueRound(app), onRestartRound: () => restartRound(app), onHome: () => exitGroup(app),
+  }));
 }
 
 function move(app, delta) {
-  cancelAdvance(app); // 手点上一题 / 下一题 = 改游标，先取消在用排程
   const next = app.index + delta;
-  if (next < 0 || next >= app.order.length) return;
-  goTo(app, next);
-}
-
-function goTo(app, next) {
-  app.index = next;
-  resetQuestionState(app);
-  const question = currentQuestion(app);
-  if (question && app.progress) {
-    app.progress = { ...app.progress, cursorQid: question.id };
-    persistProgress(app);
-  }
-  render(app);
+  if (next < 0 || next >= app.order.length) return; // 越界不动，也不取消在用排程（末题答对后的完成态面板靠它）
+  cancelAdvance(app); // 手点上一题 / 下一题 = 改游标，先取消在用排程
+  goTo(app, next, APP_OPS);
 }
 
 /** 答对后的自动前进（§2.11.3）：到点才动，任何改 order / 离开题卡的动作都会先取消它。 */
 function advance(app) {
   if (app.index + 1 >= app.order.length) return; // 末题答对不循环（D12）
-  goTo(app, app.index + 1);
+  goTo(app, app.index + 1, APP_OPS);
 }
 
 function scheduleAdvance(app) {
   cancelAdvance(app);
-  app.pendingTimer = app.timers.set(() => {
-    app.pendingTimer = null;
-    advance(app);
-  }, app.feedbackHoldMs);
+  app.pendingTimer = app.timers.set(() => { app.pendingTimer = null; advance(app); }, app.feedbackHoldMs);
 }
 
 function cancelAdvance(app) {
@@ -4231,7 +4968,7 @@ function selfAssess(app, correct) {
   finishAnswer(app, question, correct, displayText(question));
 }
 
-/** 收口一次作答：判分 → 记统计 → 错题本/错次 → 答对排程自动前进（末题答对不循环，D12）。 */
+/** 收口一次作答：判分 → 记统计 → 错题本/错次 → 记轮次 → 排程（完成态面板 / 自动前进，§2.11.12）。 */
 function finishAnswer(app, question, correct, expectedDisplay) {
   app.feedback = { correct, expectedDisplay };
   app.progress = recordAnswer(app.progress, question.id, correct).progress;
@@ -4242,44 +4979,52 @@ function finishAnswer(app, question, correct, expectedDisplay) {
     persistWrongbook(app);
   }
   persistProgress(app);
-  if (correct) {
-    // 末题答对不循环（D12）：停在本卡明示整组完成；否则排程自动前进
-    if (app.index >= app.order.length - 1) app.completed = true;
-    else scheduleAdvance(app);
-  }
+  const round = roundSummary((app.round = markRound(app.round, question.id, correct)));
+  if (round.complete) {
+    // 完成判定 = 本轮题池每题都作答过（§2.11.12）：末题答对 → 到点后才呈现面板；末题答错 → 与反馈同时可见
+    if (correct) scheduleComplete(app);
+    else app.completed = true;
+  } else if (correct && app.index < app.order.length - 1) scheduleAdvance(app);
   render(app); // 答错也要重画：停在本题并显示正确答案（R15）
 }
 
-async function removeFromWrongbook(app) {
+/** 末题答对不循环（D12）：`feedbackHoldMs` 到点后才呈现完成态面板（§2.11.12）。 */
+function scheduleComplete(app) {
   cancelAdvance(app);
-  const question = currentQuestion(app);
-  if (!question) return;
-  app.wrong = removeWrong(app.wrong, question.id);
-  const counts = { ...app.wrongCounts }; // 移出时同步删错次，不留孤儿计数（R17）
-  delete counts[question.id];
-  app.wrongCounts = counts;
-  await persistWrongbook(app);
-  app.order = orderFor(app, app.group.mode, app.group.type);
-  app.index = cursorIndex(app.order, app.progress ? app.progress.cursorQid : null);
-  if (app.index >= app.order.length) app.index = Math.max(0, app.order.length - 1);
-  resetQuestionState(app);
-  render(app);
+  app.pendingTimer = app.timers.set(() => {
+    app.pendingTimer = null;
+    app.completed = true;
+    render(app);
+  }, app.feedbackHoldMs);
 }
 
-/** 清空已掌握：把已掌握的题从错题本移出（含错次），未掌握的留着。 */
-async function clearMastered(app) {
-  cancelAdvance(app);
-  if (!app.store) return;
-  const mastery = currentMastery(app);
-  const counts = { ...app.wrongCounts };
-  for (const qid of Array.from(app.wrong)) {
-    if (mastery.get(qid) !== 'mastered') continue;
-    app.wrong = removeWrong(app.wrong, qid);
-    delete counts[qid];
-  }
-  app.wrongCounts = counts;
-  await persistWrongbook(app);
-  render(app);
+/** 答题卡（US-36）：开 / 关只改界面状态；跳题走既有定位路径（写 cursorQid，不碰作答记录）。 */
+function openSheet(app) { app.sheetOpen = true; render(app); }
+function closeSheet(app) { app.sheetOpen = false; render(app); }
+function jumpTo(app, index) { app.sheetOpen = false; goTo(app, index, APP_OPS); }
+
+/** 斩掉本轮的题：本轮题池同步收敛（池 = 可见题组，完成判定才可达）。斩题与「移出本题」共用同一语义。 */
+function dropFromRound(round, qid) {
+  if (!round || round.ids.indexOf(qid) < 0) return round;
+  const done = new Set(round.done); const wrong = new Set(round.wrong);
+  done.delete(qid); wrong.delete(qid);
+  return { ids: round.ids.filter((id) => id !== qid), done, wrong };
+}
+
+/** 继续刷本组错题（US-37）：下一轮题池 = 上一轮答错的题（按上一轮顺序）；重练轮可再作答。 */
+function continueRound(app) {
+  app.round = startRound(roundSummary(app.round).wrongIds);
+  app.order = app.round.ids.slice();
+  app.roundReplay = true;
+  goTo(app, 0, APP_OPS);
+}
+
+/** 重刷本组：用本组当前池重建第 1 轮（同属重练，可再作答）。 */
+function restartRound(app) {
+  app.order = orderFor(app, app.group.mode, app.group.type);
+  app.round = startRound(app.order);
+  app.roundReplay = true;
+  goTo(app, 0, APP_OPS);
 }
 
 function toggleUnmasteredOnly(app) {
