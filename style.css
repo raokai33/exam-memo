@@ -859,3 +859,5 @@ select, input[type="text"] {
 .actions[data-page-actions] {
   margin: 10px 0;
 }
+/* 标题下的一行进度（2026-11-01） */
+.app-sub { margin: -2px 0 8px; font-size: 0.7647rem; color: var(--muted); }
