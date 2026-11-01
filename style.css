@@ -141,14 +141,14 @@ html, body {
   gap: 8px;
   margin: 8px 0;
 }
-.matrix-grid .entry { min-height: 0; padding: 8px 12px; } /* 2026-11-01 版式：入口卡更紧凑 */
-.wrongbook-row {
+/* 集合行（US-46）：三个集合型入口并排占一行（§2.21 C / G） */
+.collection-row {
   display: flex;
   gap: 10px;
   align-items: center;
   margin-top: 10px;
 }
-.wrongbook-row .entry {
+.collection-row .entry {
   flex: 1;
 }
 .practice-extras {
@@ -377,11 +377,6 @@ html, body {
   font-size: 0.8824rem;
   color: var(--muted);
 }
-@media (max-width: 420px) {
-  .matrix-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
 /* R32（§2.19 C）：宽屏（≥740px）——① 默认档「大」（无用户选择）+ ② 入口矩阵 3 列 + ③ 栏宽 860px（与底栏同步） */
 @media (min-width: 740px) {
   html:not([data-font]) {
@@ -395,6 +390,7 @@ html, body {
     max-width: 860px;
   }
 }
+.page-version { text-align: center; opacity: 0.55; }
 
 /* 导入流程与列映射确认页样式（设计档 §2.4.5 / §2.11.4）。
    由 src/ui/style.css 迁出（N8 拆分）；build.mjs 按固定顺序拼接产出根 style.css。 */
@@ -627,7 +623,7 @@ select, input[type="text"] {
 }
 .sheet-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 .sheet-cell {
@@ -791,4 +787,57 @@ select, input[type="text"] {
   flex: 1;
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+/* 首页版式（US-46 / 设计档 §2.21）：标签条 / 双面板 / 集合行 / 页尾动作行 / 入口卡紧凑。
+   字号一律 rem（AC-45 / T58 的扫描面含本源）；间距与尺寸一律 px（不随字号档位缩放）。 */
+
+/* —— 标签条（§2.21 A 第 2 块）：两个等宽按钮；活动态 = 品牌色 + 下划线（data-on 承载，§2.21 L） —— */
+.home-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+.home-tabs .tab {
+  flex: 1;
+  font-size: 0.9412rem;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+  /* 两态同宽：活动态只换颜色，切标签不推动下方版面（§2.21 L） */
+  border-bottom-width: 3px;
+}
+.home-tabs .tab[data-on] {
+  color: var(--brand);
+  background: #eff4ff;
+  border-color: var(--brand);
+  font-weight: 600;
+}
+
+/* —— 面板（§2.21 A 第 4 / 5 块）：未选中者 `hidden`，样式再兜一层 —— */
+.matrix-group[hidden] {
+  display: none;
+}
+.matrix-group {
+  margin: 6px 0;
+}
+.matrix-group .matrix-hint {
+  margin: 2px 0 6px;
+}
+
+/* —— 入口卡（§2.21 L）：2 列下上下两段，触控目标不小于 44 px；紧凑只压内边距与网格间隙 —— */
+.matrix-grid {
+  gap: 6px;
+}
+.matrix-grid .entry {
+  min-height: 44px;
+  padding: 4px 10px;
+}
+.collection-row .entry {
+  padding: 6px 10px;
+}
+
+/* —— 页尾动作行（§2.21 A 第 6 块）：复用既有 .actions 布局，只收紧上下留白 —— */
+.actions[data-page-actions] {
+  margin: 10px 0;
 }
