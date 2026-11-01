@@ -166,7 +166,7 @@ html, body {
   padding: 8px 12px;
 }
 /* 考试题型选中态（US-45）：原先只写了 class=.on 而没有样式，点了看不出选中——补齐高亮反馈 */
-.exam-type.on { border-color: var(--brand); background: #eff4ff; color: var(--brand); font-weight: 600; }
+.exam-type.on, .exam-count.on { border-color: var(--brand); background: #eff4ff; color: var(--brand); font-weight: 600; }
 /* 开关开启态（§2.11.4：aria-pressed + data-on 双通道） */
 .switch[data-on] {
   border-color: var(--brand);
