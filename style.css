@@ -149,13 +149,15 @@ html, body {
   margin-top: 10px;
 }
 .collection-row .entry {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
 }
 .practice-extras {
   margin-top: 4px;
 }
 .switch-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin: 10px 0;
 }
@@ -163,6 +165,8 @@ html, body {
   font-size: 0.8235rem;
   padding: 8px 12px;
 }
+/* 考试题型选中态（US-45）：原先只写了 class=.on 而没有样式，点了看不出选中——补齐高亮反馈 */
+.exam-type.on { border-color: var(--brand); background: #eff4ff; color: var(--brand); font-weight: 600; }
 /* 开关开启态（§2.11.4：aria-pressed + data-on 双通道） */
 .switch[data-on] {
   border-color: var(--brand);
@@ -492,6 +496,15 @@ select, input[type="text"] {
 .exam-progress, .exam-assess-title {
   font-size: 0.8235rem;
   color: var(--muted);
+}
+/* 考试头部两行：第一行「剩余时间 …… 退出」，第二行「第 X / N 题 · 已答 M」（2026-11-01 用户反馈：挤一行看不清） */
+.exam-top .exam-progress {
+  flex-basis: 100%;
+  order: 3;
+  text-align: left;
+  padding-left: 0;
+  border-color: transparent;
+  background: transparent;
 }
 .exam-top .exam-exit {
   margin-left: auto;
