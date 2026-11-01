@@ -394,7 +394,7 @@ html, body {
     max-width: 860px;
   }
 }
-.page-version { text-align: center; opacity: 0.55; }
+.page-version { display: block; width: 100%; text-align: center; opacity: 0.55; background: transparent; border: 0; padding: 8px 0; font-size: 0.7647rem; color: var(--muted); }
 
 /* 导入流程与列映射确认页样式（设计档 §2.4.5 / §2.11.4）。
    由 src/ui/style.css 迁出（N8 拆分）；build.mjs 按固定顺序拼接产出根 style.css。 */
