@@ -2392,6 +2392,28 @@ function writeDiag(app) {
 /** 一次会话只自动刷一次（防止 controllerchange 反复触发成循环）。 */
 let appReloaded = false;
 
+/** 背题面点选项后看答案的停留时长（毫秒）：到点自动进下一题（US-42）。 */
+const MEMORIZE_PICK_HOLD_MS = 1500;
+
+/**
+ * 背题面点选项（US-42）：**只做「揭示答案 + 到点自动进下一题」**——不判分、不记对错、不写统计（AC-11 / AC-35）。
+ * 与练习面的自动前进同一套排程字段（`app.pendingTimer`），所以手点翻页 / 退出都走既有取消路径。
+ */
+function memorizePick(app, ops) {
+  if (!app.group || app.group.mode !== 'memorize') return;
+  if (app.pendingTimer !== null && app.pendingTimer !== undefined) {
+    app.timers.clear(app.pendingTimer);
+    app.pendingTimer = null;
+  }
+  app.answerShown = true;
+  app.pendingTimer = app.timers.set(() => {
+    app.pendingTimer = null;
+    if (app.index + 1 >= app.order.length) { ops.render(app); return; } // 末题不循环（D12）
+    goTo(app, app.index + 1, ops);
+  }, MEMORIZE_PICK_HOLD_MS);
+  ops.render(app);
+}
+
 /** 注册 service worker（PWA 形态；单文件从 file:// 打开时不注册，§2.12.1）。由 app.mjs 迁出（N8 行数纪律）。 */
 function registerServiceWorker() {
   const location = globalThis.location;
@@ -2417,7 +2439,7 @@ function registerServiceWorker() {
 }
 
 
-__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, loadKilled: loadKilled, persistKilled: persistKilled, preloadProgress: preloadProgress, loadUiState: loadUiState, enterGroup: enterGroup, goTo: goTo, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag, registerServiceWorker: registerServiceWorker };
+__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, loadKilled: loadKilled, persistKilled: persistKilled, preloadProgress: preloadProgress, loadUiState: loadUiState, enterGroup: enterGroup, goTo: goTo, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag, memorizePick: memorizePick, registerServiceWorker: registerServiceWorker };
 }());
 (function () {
 // 题库装载（N8 拆分自 app.mjs）：读存储 / 内嵌题库、换表备份与重绘（§2.10.3 / §2.4.2）。
@@ -2856,7 +2878,8 @@ function renderCard(container, view) {
   const summary = el('p', {
     class: 'card-summary',
     text: `${MODE_LABELS[view.group.mode]} · ${GROUP_TYPE_LABELS[view.group.type] || view.group.type}` +
-      (view.accuracy === null ? '' : ` · 正确率 ${(view.accuracy * 100).toFixed(0)}%（${view.answeredCount} 题已答）`),
+      // 背题面不显示正确率 / 「N 题已答」（US-42：2026-11-01 用户裁）——背题不判分，这个数没有意义
+      (view.mode === 'memorize' || view.accuracy === null ? '' : ` · 正确率 ${(view.accuracy * 100).toFixed(0)}%（${view.answeredCount} 题已答）`),
   });
 
   const screen = el('main', { class: 'screen' }, [
@@ -2920,10 +2943,11 @@ function roundPanel(view) {
 function renderMemorizeBody(question, view) {
   const shown = view.answerShown === true; // §2.11.7②：fail-closed
   const nodes = [];
+  // US-42：可点选——点一下即揭示答案，停 MEMORIZE_PICK_HOLD_MS 后自动进下一题（不判分、不记统计）
   if (question.type === 'single' || question.type === 'multi') {
-    nodes.push(renderOptions(question, view, { interactive: false, showCorrect: shown }));
+    nodes.push(renderOptions(question, view, { interactive: true, showCorrect: shown, onPick: view.onMemorizePick }));
   } else if (question.type === 'judge') {
-    nodes.push(judgeRow(question, { picked: null, interactive: false, showAnswer: shown }));
+    nodes.push(judgeRow(question, { picked: null, interactive: true, showAnswer: shown, onPick: view.onMemorizePick }));
   }
   if (shown) nodes.push(answerBlock(question));
   return el('div', { class: 'answer-zone' }, nodes);
@@ -3065,6 +3089,7 @@ function judgeRow(question, options) {
 
 function renderOptions(question, view, options) {
   const response = view.response || {};
+  const pick = options.onPick || view.onPick; // 背题面传自己的处理器（US-42）；其余面走 view.onPick
   const letters = response.letters || (response.letter ? [response.letter] : []);
   const correctLetters = (question.answer.letters || []).slice();
   const nodes = question.options.map((option) => {
@@ -3078,7 +3103,7 @@ function renderOptions(question, view, options) {
       class: classes.join(' '),
       type: 'button',
       disabled: !options.interactive,
-      on: options.interactive ? { click: () => view.onPick({ letter: option.letter }) } : undefined,
+      on: options.interactive ? { click: () => pick({ letter: option.letter }) } : undefined,
     }, [
       el('span', { class: 'option-letter', text: option.letter }),
       el('span', { class: 'option-text', text: option.text }),
@@ -4805,7 +4830,7 @@ const { createImportFlow } = __MODULES__["src/ui/import.mjs"];
 const { killCurrent, killedView, renderKilledPage } = __MODULES__["src/ui/killed.mjs"];
 const { releaseSheetEscape, sheetModel } = __MODULES__["src/ui/sheet.mjs"];
 const { clearMastered } = __MODULES__["src/ui/wrongbook-ops.mjs"];
-const { enterGroup, goTo, persistProgress, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
+const { enterGroup, goTo, memorizePick, persistProgress, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
 const { cardView, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
 const { backupBlock } = __MODULES__["src/ui/backup.mjs"];
 const { renderEntryMatrix } = __MODULES__["src/ui/stats.mjs"];
@@ -4980,8 +5005,8 @@ function renderQuestion(app) {
     onSubmit: (payload) => resolveAnswer(app, payload),
     onEssaySubmit: (text) => submitEssay(app, text),
     onSelfAssess: (correct) => selfAssess(app, correct),
-    onKill: () => killCurrent(app, APP_OPS),
-    onOpenSheet: () => openSheet(app),
+    onKill: () => killCurrent(app, APP_OPS), onOpenSheet: () => openSheet(app),
+    onMemorizePick: () => memorizePick(app, APP_OPS), // US-42：背题点选 → 揭示 + 自动进下一题
     onContinueRound: () => continueRound(app), onRestartRound: () => restartRound(app), onHome: () => exitGroup(app),
   }));
 }
