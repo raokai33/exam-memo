@@ -499,10 +499,9 @@ select, input[type="text"] {
   font-size: 0.8235rem;
   color: var(--muted);
 }
-/* 考试头部两行：第一行「剩余时间 …… 退出」，第二行「第 X / N 题 · 已答 M」（2026-11-01 用户反馈：挤一行看不清） */
+/* 考试头部单行：进度（左）……退出（右）——取消倒计时后不再单占一行（2026-11-01 用户反馈：左上角空一块、题目掉到屏幕中间） */
 .exam-top .exam-progress {
-  flex-basis: 100%;
-  order: 3;
+  flex: 1 1 auto;
   text-align: left;
   padding-left: 0;
   border-color: transparent;
