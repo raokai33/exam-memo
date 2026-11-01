@@ -2389,6 +2389,9 @@ function writeDiag(app) {
   ].join(' ');
 }
 
+/** 一次会话只自动刷一次（防止 controllerchange 反复触发成循环）。 */
+let appReloaded = false;
+
 /** 注册 service worker（PWA 形态；单文件从 file:// 打开时不注册，§2.12.1）。由 app.mjs 迁出（N8 行数纪律）。 */
 function registerServiceWorker() {
   const location = globalThis.location;
@@ -2398,11 +2401,21 @@ function registerServiceWorker() {
   const nav = globalThis.navigator;
   if (!nav || !('serviceWorker' in nav)) return;
   try {
-    nav.serviceWorker.register('sw.js').catch((err) => console.error('service worker 注册失败', err));
+    // updateViaCache:'none' + 主动 update()：打开即查新，不等浏览器自己的节奏
+    const registration = nav.serviceWorker.register('sw.js', { updateViaCache: 'none' });
+    if (registration && registration.then) registration.then((reg) => { if (reg && reg.update) reg.update().catch(() => {}); })
+      .catch((err) => console.error('service worker 注册失败', err));
+    // 新版本接管 → 自动刷一次（只刷一次；刷新后拿到的是新缓存里的 app.js）
+    if (nav.serviceWorker.addEventListener) nav.serviceWorker.addEventListener('controllerchange', () => {
+      if (appReloaded) return;
+      appReloaded = true;
+      if (location && typeof location.reload === 'function') location.reload();
+    });
   } catch (err) {
     console.error('service worker 注册失败', err);
   }
 }
+
 
 __MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, loadKilled: loadKilled, persistKilled: persistKilled, preloadProgress: preloadProgress, loadUiState: loadUiState, enterGroup: enterGroup, goTo: goTo, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag, registerServiceWorker: registerServiceWorker };
 }());
