@@ -573,6 +573,20 @@ select, input[type="text"] {
   font-size: 0.8824rem;
 }
 
+/* 首页「开始考试」入口：标题与说明分两行左对齐（不挤压、不溢出按钮） */
+.exam-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  white-space: normal;
+  max-width: 100%;
+}
+.exam-entry .entry-meta {
+  white-space: normal;
+}
+
 /* 错题闭环样式（006：US-33–US-38 / §2.11.9–§2.11.14）：
    答题卡（遮罩 + 网格）· 斩题二次确认 · 考试结果页逐题核对 · 易错 chip · 轮次完成态面板 · 已斩题区块。
    构建拼接源第 4 位（§2.4.5）：style.css → style-import.css → style-exam.css → style-wrongloop.css。
@@ -739,13 +753,17 @@ select, input[type="text"] {
 
 /* —— 已斩题区块与恢复面（US-34 / KD-44） —— */
 .killed-block {
-  margin-top: 18px;
+  background: var(--card);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin: 12px 0;
 }
 /* —— 数据备份 / 恢复（US-40） —— */
 .backup-block {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin: 12px 0;
 }
 .killed-list {
   list-style: none;
