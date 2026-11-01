@@ -167,6 +167,8 @@ html, body {
 }
 /* 考试题型选中态（US-45）：原先只写了 class=.on 而没有样式，点了看不出选中——补齐高亮反馈 */
 .exam-type.on, .exam-count.on { border-color: var(--brand); background: #eff4ff; color: var(--brand); font-weight: 600; }
+/* 考试题型 / 题数两行按钮统一尺寸（2026-11-01）：等宽等高于本行 */
+.exam-types .btn, .exam-counts .btn { flex: 1 1 0; min-width: 0; min-height: 34px; padding: 6px 4px; font-size: 0.8235rem; text-align: center; }
 /* 开关开启态（§2.11.4：aria-pressed + data-on 双通道） */
 .switch[data-on] {
   border-color: var(--brand);
