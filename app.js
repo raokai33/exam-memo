@@ -4704,7 +4704,7 @@ function renderEntryMatrix(container, view) {
   const fontLabel = FONT_LABELS[view.fontLevel] || FONT_LABELS[0];
   const screen = el('main', { class: 'screen' }, [
     el('h1', { class: 'app-title app-head' }, [
-      el('span', { text: '高级工背题' }),
+      el('span', { text: '高级工刷题' }),
       el('button', {
         class: 'btn font-switch',
         type: 'button',
@@ -4713,7 +4713,20 @@ function renderEntryMatrix(container, view) {
         on: { click: view.onCycleFont },
       }),
     ]),
+    // 标题下的一行实话（2026-11-01 用户：顶部那段要么换名、要么显示点有用的）
+    dataLine(view),
   ]);
+
+/** 标题下的一行进度：共 N 题 · 已掌握 M（2026-11-01 用户：顶部那行别只写名字）。 */
+function dataLine(view) {
+  const questions = (view.bank && view.bank.questions) || [];
+  const total = questions.length;
+  if (!total) return el('p', { class: 'app-sub', text: '题库为空 · 请先导入' });
+  const summary = view.summaryOf('practice', 'all');
+  const mastery = (summary && summary.mastery) || { mastered: 0 };
+  return el('p', { class: 'app-sub', text: `共 ${total} 题 · 已掌握 ${mastery.mastered}` });
+}
+
 
   if (shouldShowInstallHint(view.ui)) {
     screen.appendChild(el('p', { class: 'banner banner-info install-hint' }, [
@@ -5386,4 +5399,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.8.1";
+window.EXAM_MEMO_VERSION="1.8.2";
