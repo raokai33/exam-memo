@@ -803,6 +803,10 @@ select, input[type="text"] {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+/* 结果页批量斩题（2026-11-01）：二次确认态用红色；卡片横幅的撤销按钮 */
+.review-kill-all { width: 100%; margin: 6px 0 10px; border-color: var(--brand); }
+.review-kill-all.armed { border-color: #c0392b; background: #fff1f0; color: #c0392b; font-weight: 600; }
+.undo-kill { margin-left: 10px; padding: 2px 12px; font-size: 0.7647rem; }
 
 /* 首页版式（US-46 / 设计档 §2.21）：标签条 / 双面板 / 集合行 / 页尾动作行 / 入口卡紧凑。
    字号一律 rem（AC-45 / T58 的扫描面含本源）；间距与尺寸一律 px（不随字号档位缩放）。 */
