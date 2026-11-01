@@ -3269,19 +3269,38 @@ function poolFor(questions, type, killed) {
 }
 
 /** 抽题池合计（入口 disabled 判据：合计 0 → 入口禁用，§2.11.8 ②）；已斩题不计数。 */
-function examPoolTotal(questions, killed, examType) {
+function examPoolTotal(questions, killed, examType, examCount) {
   let total = 0;
-  for (const [type] of planFor(examType)) total += poolFor(questions, type, killed).length;
+  for (const [type] of planFor(examType, examCount)) total += poolFor(questions, type, killed).length;
   return total;
 }
 
 /** 考试题型可选项（US-45）：`all` = 全部按配比；否则只考那一种题型。 */
 const EXAM_TYPE_LABELS = { all: '全部', single: '单选', multi: '多选', judge: '判断', fill: '填空', essay: '简答' };
 
-/** 本次卷面的题型配比（US-45）：`all`/空 = 标准配比；指定题型 = 只取那一项。 */
-function planFor(examType) {
-  if (!examType || examType === 'all') return EXAM_PLAN;
-  return EXAM_PLAN.filter(([type]) => type === examType);
+/** 考试题数档（US-47，2026-11-01 用户要求）：10 / 20 / 39（标准）/ 全部。 */
+const EXAM_COUNT_PRESETS = [10, 20, 39, 'all'];
+const EXAM_COUNT_LABELS = { 10: '10 题', 20: '20 题', 39: '39 题', all: '全部' };
+/** 每档的题型配比：10 / 20 为等比缩小的写死配比；39 = 标准；全部 = 每型全抽。 */
+const EXAM_PLAN_BY_COUNT = {
+  10: [['single', 3], ['multi', 1], ['judge', 3], ['fill', 2], ['essay', 1]],
+  20: [['single', 5], ['multi', 3], ['judge', 5], ['fill', 5], ['essay', 2]],
+  39: EXAM_PLAN,
+  all: [['single', Infinity], ['multi', Infinity], ['judge', Infinity], ['fill', Infinity], ['essay', Infinity]],
+};
+
+/** 本次卷面的题型配比（US-45 / US-47）：
+ *  - 题型 = 全部：按题数档取配比（10 / 20 等比缩小、39 标准、全部 = 每型抽满）；
+ *  - 题型 = 某一类：题数档就是该型的题数（选「单选 + 10 题」= 10 道单选）。 */
+function planFor(examType, examCount) {
+  const key = examCount === undefined || examCount === null ? 39 : examCount;
+  if (!examType || examType === 'all') return EXAM_PLAN_BY_COUNT[key] || EXAM_PLAN;
+  return [[examType, key === 'all' ? Infinity : Number(key)]];
+}
+
+/** 本卷应有题数（题池够时）：`全部` 档 = Infinity（不设上限，抽满即止）。 */
+function planTotal(examType, examCount) {
+  return planFor(examType, examCount).reduce((sum, [, quota]) => sum + quota, 0);
 }
 
 /** 已答判据（§2.11.8 ④，写死）：选择 / 判断有选择；填空至少一空非空（去空白）；简答文本去空白后非空。 */
@@ -3337,12 +3356,12 @@ function answeredQids(questions, paper, answers) {
  * 抽题（§2.11.8 ①，写死）：逐题型做部分 Fisher–Yates 选前 k 题（k = min(配比, 池大小)，k ≥ n 时全取）；
  * 随机只决定「抽哪些」——卷面顺序恒为 EXAM_PLAN 题型序 → 同题型源表序（AC-40）。
  */
-function drawExam(questions, random, killed, examType) {
+function drawExam(questions, random, killed, examType, examCount) {
   const pick = typeof random === 'function' ? random : Math.random;
   const qids = [];
   const perType = {};
   const missing = {};
-  for (const [type, quota] of planFor(examType)) {
+  for (const [type, quota] of planFor(examType, examCount)) {
     const pool = poolFor(questions, type, killed); // 单一池判据（§2.11.10）；抽完按源内序还原卷面顺序
     const count = Math.min(quota, pool.length);
     for (let i = 0; i < count; i += 1) {
@@ -3353,7 +3372,7 @@ function drawExam(questions, random, killed, examType) {
     }
     const picked = pool.slice(0, count).sort((a, b) => a.index - b.index);
     perType[type] = picked.length;
-    missing[type] = quota - picked.length;
+    missing[type] = Number.isFinite(quota) ? quota - picked.length : 0; // 「全部」档不设缺额（抽满即止）
     for (const item of picked) qids.push(item.id);
   }
   return { qids, perType, missing, total: qids.length };
@@ -3411,7 +3430,7 @@ function formatRemaining(ms) {
   return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
 }
 
-__MODULES__["src/core/exam.mjs"] = { examView: examView, poolFor: poolFor, examPoolTotal: examPoolTotal, planFor: planFor, hasAnswer: hasAnswer, describeResponse: describeResponse, answeredQids: answeredQids, drawExam: drawExam, scoreExam: scoreExam, pendingEssayIndexes: pendingEssayIndexes, formatRemaining: formatRemaining, EXAM_PLAN: EXAM_PLAN, EXAM_TOTAL: EXAM_TOTAL, EXAM_DURATION_MS: EXAM_DURATION_MS, EXAM_TICK_MS: EXAM_TICK_MS, EXAM_STATE_VERSION: EXAM_STATE_VERSION, EXAM_EXCLUDED_MARKS: EXAM_EXCLUDED_MARKS, EXAM_TYPE_LABELS: EXAM_TYPE_LABELS };
+__MODULES__["src/core/exam.mjs"] = { examView: examView, poolFor: poolFor, examPoolTotal: examPoolTotal, planFor: planFor, planTotal: planTotal, hasAnswer: hasAnswer, describeResponse: describeResponse, answeredQids: answeredQids, drawExam: drawExam, scoreExam: scoreExam, pendingEssayIndexes: pendingEssayIndexes, formatRemaining: formatRemaining, EXAM_PLAN: EXAM_PLAN, EXAM_TOTAL: EXAM_TOTAL, EXAM_DURATION_MS: EXAM_DURATION_MS, EXAM_TICK_MS: EXAM_TICK_MS, EXAM_STATE_VERSION: EXAM_STATE_VERSION, EXAM_EXCLUDED_MARKS: EXAM_EXCLUDED_MARKS, EXAM_TYPE_LABELS: EXAM_TYPE_LABELS, EXAM_COUNT_PRESETS: EXAM_COUNT_PRESETS, EXAM_COUNT_LABELS: EXAM_COUNT_LABELS, EXAM_PLAN_BY_COUNT: EXAM_PLAN_BY_COUNT };
 }());
 (function () {
 // 斩题动作与「已斩题」恢复面（US-34 / §2.11.10 / KD-38 / KD-44）。
@@ -3631,7 +3650,7 @@ __MODULES__["src/ui/exam-result.mjs"] = { resultPage: resultPage };
 // 006：结果页（含逐题核对与两个动作）迁出到 exam-result.mjs；答题页进度条可点开答题卡（US-36）。
 const { blankCountOf } = __MODULES__["src/core/answers.mjs"];
 const { TYPE_LABELS } = __MODULES__["src/core/detect.mjs"];
-const { answeredQids, drawExam, examView, EXAM_DURATION_MS, EXAM_PLAN, EXAM_STATE_VERSION, EXAM_TICK_MS, EXAM_TOTAL, formatRemaining, hasAnswer, pendingEssayIndexes } = __MODULES__["src/core/exam.mjs"];
+const { answeredQids, drawExam, examView, EXAM_DURATION_MS, EXAM_STATE_VERSION, EXAM_TICK_MS, formatRemaining, hasAnswer, pendingEssayIndexes, planFor, planTotal } = __MODULES__["src/core/exam.mjs"];
 const { answerBlock, judgeRow, renderOptions } = __MODULES__["src/ui/card.mjs"];
 const { resultPage } = __MODULES__["src/ui/exam-result.mjs"];
 const { TYPE_LABELS: SHORT_TYPE_LABELS } = __MODULES__["src/core/progress.mjs"];
@@ -3693,10 +3712,10 @@ function createExamFlow(options) {
   return flow;
 }
 
-/** 抽题开考（新的一卷）：配比走 EXAM_PLAN；池空 → 空态（不白屏）。 */
+/** 抽题开考（新的一卷）：配比走「题型 + 题数档」（US-45 / US-47）；池空 → 空态（不白屏）。 */
 function startExam(app, flow) {
   const state = flow.state;
-  const paper = drawExam((app.bank && app.bank.questions) || [], app.random, app.killed, app.uiState && app.uiState.examType);
+  const paper = drawExam((app.bank && app.bank.questions) || [], app.random, app.killed, examTypeNow(app), countNow(app));
   const startedAt = app.nowMs();
   Object.assign(state, {
     paper: { qids: paper.qids, total: paper.total }, saved: null, answers: {}, selfAssess: {}, index: 0,
@@ -3931,23 +3950,24 @@ function answeringPage(app, flow) {
   const nodes = [el('header', { class: 'exam-top' }, [flow.refs.remaining, flow.refs.progress, btn('btn-ghost exam-exit', '退出', () => flow.exit())])];
   if (state.notice) nodes.push(el('p', { class: 'banner banner-warn exam-notice', text: state.notice }));
   if (state.saveError) nodes.push(el('p', { class: 'banner banner-warn exam-save-warn', text: '本次进度可能未保存' }));
-  if (state.paper.total < EXAM_TOTAL) nodes.push(el('p', { class: 'banner banner-warn exam-note', text: shortfallText(app, state) }));
+  const target = planTotal(examTypeNow(app), countNow(app));
+  if (Number.isFinite(target) && state.paper.total < target) nodes.push(el('p', { class: 'banner banner-warn exam-note', text: shortfallText(app, state, target) }));
   nodes.push(questionCard(question, questionZone(app, flow, question)));
   nodes.push(el('div', { class: 'card-footer exam-footer' }, [footer(app, flow)]));
   updateBars(app, flow); // 首屏即显剩余 / 已答
   return nodes;
 }
-/** 题库不足提示条（§2.11.8 ②）：本卷 X 题（标准 39 题）+ 逐题型缺额（缺额为 0 的不列）。 */
-function shortfallText(app, state) {
+const examTypeNow = (app) => (app.uiState && app.uiState.examType) || 'all';
+const countNow = (app) => { const c = app.uiState && app.uiState.examCount; return c === undefined || c === null ? 39 : c; };
+function shortfallText(app, state, target) {
   const counts = {};
   for (const qid of state.paper.qids) {
     const question = app.questionIndex.get(qid);
     if (question) counts[question.type] = (counts[question.type] || 0) + 1;
   }
-  const parts = EXAM_PLAN
-    .filter(([type, quota]) => (counts[type] || 0) < quota)
+  const parts = planFor(examTypeNow(app), countNow(app)).filter(([type, quota]) => Number.isFinite(quota) && (counts[type] || 0) < quota)
     .map(([type, quota]) => `${SHORT_TYPE_LABELS[type] || type}缺 ${quota - (counts[type] || 0)}`);
-  return `题库不足：本卷 ${state.paper.total} 题（标准 ${EXAM_TOTAL} 题）· ${parts.join(' / ')}`;
+  return `题库不足：本卷 ${state.paper.total} 题（应 ${target} 题）· ${parts.join(' / ')}`;
 }
 /** 题卡骨架（作答页与自评页共用）：来源题号 + 题型 + 题干 + 部件。 */
 function questionCard(question, zone) {
@@ -4558,13 +4578,20 @@ function setExamType(app, type, ops) {
   ops.render(app);
 }
 
-__MODULES__["src/ui/ui-ops.mjs"] = { toggleUnmasteredOnly: toggleUnmasteredOnly, toggleShuffled: toggleShuffled, dismissInstallHint: dismissInstallHint, cycleFont: cycleFont, switchHomeTab: switchHomeTab, setExamType: setExamType };
+/** 选考试题数档（US-47）：10 / 20 / 39 / 全部。 */
+function setExamCount(app, count, ops) {
+  app.uiState = Object.assign({}, app.uiState, { examCount: count });
+  saveUiState(app);
+  ops.render(app);
+}
+
+__MODULES__["src/ui/ui-ops.mjs"] = { toggleUnmasteredOnly: toggleUnmasteredOnly, toggleShuffled: toggleShuffled, dismissInstallHint: dismissInstallHint, cycleFont: cycleFont, switchHomeTab: switchHomeTab, setExamType: setExamType, setExamCount: setExamCount };
 }());
 (function () {
 // 入口矩阵与统计（设计档 §2.11.1 / §2.11.6 / §2.11.11 / §2.11.13：15 个入口 + 掌握度 meta + 三个集合型入口 + 两个开关）。
 // R6 / R8 / R9 / R16 / R18 / R20 / US-34 / US-35 / US-38。
 
-const { EXAM_DURATION_MS, EXAM_TYPE_LABELS, EXAM_TOTAL, examPoolTotal, planFor } = __MODULES__["src/core/exam.mjs"];
+const { EXAM_COUNT_LABELS, EXAM_COUNT_PRESETS, EXAM_DURATION_MS, EXAM_TYPE_LABELS, examPoolTotal, planTotal } = __MODULES__["src/core/exam.mjs"];
 
 /** 考试题型可选值（US-45）：全部 / 单选 / 多选 / 判断 / 填空 / 简答。 */
 const EXAM_TYPE_OPTIONS = ['all', 'single', 'multi', 'judge', 'fill', 'essay'];
@@ -4759,7 +4786,10 @@ function renderKilledBlock(view) {
 function renderExamBlock(view) {
   const questions = (view.bank && view.bank.questions) || [];
   const current = view.examType || 'all';
-  const target = planFor(current).reduce((sum, [, quota]) => sum + quota, 0);
+  const count = view.examCount === undefined || view.examCount === null ? 39 : view.examCount;
+  // 预计题数 = min(本卷应有, 题池)；「全部」档 = 题池全部（planTotal 为 Infinity）
+  const poolTotal = examPoolTotal(questions, view.killed, current, count);
+  const target = Math.min(planTotal(current, count), poolTotal);
   const types = el('div', { class: 'switch-row exam-types' }, EXAM_TYPE_OPTIONS.map((value) => el('button', {
     class: `btn exam-type${current === value ? ' on' : ''}`,
     type: 'button',
@@ -4767,10 +4797,19 @@ function renderExamBlock(view) {
     dataset: { examType: value },
     on: { click: () => view.onSelectExamType(value) },
   })));
+  // 题数档（US-47）：10 / 20 / 39 / 全部
+  const counts = el('div', { class: 'switch-row exam-counts' }, EXAM_COUNT_PRESETS.map((value) => el('button', {
+    class: `btn exam-count${count === value ? ' on' : ''}`,
+    type: 'button',
+    text: EXAM_COUNT_LABELS[value],
+    dataset: { examCount: String(value) },
+    on: { click: () => view.onSelectExamCount(value) },
+  })));
   return el('section', { class: 'matrix-group exam-block', dataset: { mode: 'exam' } }, [
     el('h2', { class: 'matrix-title', text: '模拟考试' }),
     el('p', { class: 'matrix-hint', text: '按题型抽题成卷，限时作答；交卷后给总分与逐题对错。' }),
     types,
+    counts,
     el('button', {
       class: 'btn exam-entry',
       type: 'button',
@@ -4887,7 +4926,7 @@ const { clearMastered } = __MODULES__["src/ui/wrongbook-ops.mjs"];
 const { enterGroup, goTo, memorizePick, persistProgress, persistStreaks, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
 const { cardView, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
 const { continueRound, dropFromRound, restartRound } = __MODULES__["src/ui/round-ops.mjs"];
-const { cycleFont, dismissInstallHint, setExamType, switchHomeTab, toggleShuffled, toggleUnmasteredOnly } = __MODULES__["src/ui/ui-ops.mjs"];
+const { cycleFont, dismissInstallHint, setExamCount, setExamType, switchHomeTab, toggleShuffled, toggleUnmasteredOnly } = __MODULES__["src/ui/ui-ops.mjs"];
 const { renderEntryMatrix } = __MODULES__["src/ui/stats.mjs"];
 
 /** 答对多少次自动斩（US-44）：写死 3——用户口径「连续三次做对就斩」。 */
@@ -4993,7 +5032,9 @@ function renderMatrix(app) {
     onImport: () => openImport(app),
     onOpenExam: () => { openExam(app, render); }, // R29：模拟考试入口（§2.11.8）
     examType: (app.uiState && app.uiState.examType) || 'all', // US-45：考试题型选择
+    examCount: (app.uiState && app.uiState.examCount) || 39, // US-47：考试题数档（10 / 20 / 39 / 全部）
     onSelectExamType: (type) => setExamType(app, type, APP_OPS),
+    onSelectExamCount: (count) => setExamCount(app, count, APP_OPS),
     killed: app.killed, // US-34：「已斩 N 题」末块 + 考试池 disabled 判据
     onOpenKilled: () => { app.view = 'killed'; render(app); },
     onClearMastered: () => clearMastered(app, APP_OPS),
@@ -5253,4 +5294,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.4.1";
+window.EXAM_MEMO_VERSION="1.5.0";
