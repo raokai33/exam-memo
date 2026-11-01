@@ -2912,8 +2912,11 @@ function renderCard(container, view) {
 
   const screen = el('main', { class: 'screen' }, [
     summary,
-    // 一次性提示（斩题：已斩 · 可在首页恢复；同首页的 notice 通道）
-    view.notice ? el('p', { class: 'banner banner-warn card-notice', text: view.notice }) : null,
+    // 一次性提示（斩题）：练习面给「撤销」按钮（2026-11-01：手误会误斩）
+    view.notice ? el('p', { class: 'banner banner-warn card-notice' }, [
+      el('span', { text: view.notice }),
+      view.undoKill ? el('button', { class: 'btn btn-ghost undo-kill', type: 'button', text: '撤销', on: { click: view.onUndoKill } }) : null,
+    ].filter(Boolean)) : null,
     el('article', { class: 'card' }, [
       head,
       body,
@@ -3538,7 +3541,8 @@ async function killCurrent(app, ops) {
   if (!qid || !app.group) return;
   ops.cancelAdvance(app); // 改定位 / 换题前先取消在用排程（自动前进 / 背题揭示）
   await killQuestion(app, qid);
-  // 2026-11-01 用户裁：背题模式斩题不弹「已斩 · 可在首页恢复」（翻卡时提示反而打断）；练习模式不变
+  // 2026-11-01 用户裁：背题模式斩题不弹提示（翻卡时打断）；练习模式给「可撤销」——手误会误斩
+  app.lastKill = app.group.mode === 'memorize' ? null : qid;
   app.notice = app.group.mode === 'memorize' ? null : '已斩 · 可在首页恢复';
   app.round = ops.dropFromRound(app.round, qid);
   app.order = app.roundReplay ? app.order.filter((id) => id !== qid) : orderFor(app, app.group.mode, app.group.type);
@@ -3628,7 +3632,7 @@ function btn(className, text, onClick, extra) {
 
 /** 本页的本地状态（只活在本会话里）：已加入错题本的题 + 已在结果页斩掉的题。 */
 function resultState(flow) {
-  if (!flow.state.result) flow.state.result = { added: new Set(), killed: new Set() };
+  if (!flow.state.result) flow.state.result = { added: new Set(), killed: new Set(), killAllArmed: false };
   return flow.state.result;
 }
 
@@ -3660,11 +3664,23 @@ function resultPage(app, flow) {
     btn('exam-home', '返回首页', () => flow.home()),
   ]);
   const review = el('ol', { class: 'review-list' }, result.rows.map((row, index) => reviewRow(app, flow, row, index, rst)));
+  // 斩掉全部答对的题（2026-11-01 用户要求）：二次确认，防一次误触斩一大片
+  const correctLeft = result.rows.filter((row) => row.outcome === 'correct' && !rst.killed.has(row.qid));
+  const killAll = correctLeft.length === 0 ? null : btn(
+    `review-kill-all${rst.killAllArmed ? ' armed' : ''}`,
+    rst.killAllArmed ? `确认斩掉这 ${correctLeft.length} 题？再点一次` : `斩掉全部答对的题（${correctLeft.length} 题）`,
+    async () => {
+      if (!rst.killAllArmed) { rst.killAllArmed = true; flow.refresh(); return; }
+      for (const row of correctLeft) { await killQuestion(app, row.qid); rst.killed.add(row.qid); }
+      rst.killAllArmed = false;
+      flow.refresh();
+    },
+  );
   return [
     el('h1', { class: 'app-title', text: '考试结果' }), el('p', { class: 'exam-score', text: `得分 ${result.score} / ${result.total}` }),
     el('p', { class: 'exam-accuracy', text: `正确率 ${percent}%` }), el('h2', { class: 'exam-list-title', text: '逐题对错' }), list,
     actions,
-    el('h2', { class: 'exam-list-title', text: '逐题核对' }), review,
+    el('h2', { class: 'exam-list-title', text: '逐题核对' }), ...(killAll ? [killAll] : []), review,
   ];
 }
 
@@ -4983,7 +4999,7 @@ const { currentFontLevel, cycleFontLevel } = __MODULES__["src/ui/font.mjs"];
 const { attachDoubleTapGuard } = __MODULES__["src/ui/gesture.mjs"];
 const { openExam } = __MODULES__["src/ui/exam.mjs"];
 const { createImportFlow } = __MODULES__["src/ui/import.mjs"];
-const { killCurrent, killedView, renderKilledPage } = __MODULES__["src/ui/killed.mjs"];
+const { killCurrent, killedView, renderKilledPage, restoreQuestion } = __MODULES__["src/ui/killed.mjs"];
 const { releaseSheetEscape, sheetModel } = __MODULES__["src/ui/sheet.mjs"];
 const { clearMastered } = __MODULES__["src/ui/wrongbook-ops.mjs"];
 const { enterGroup, forceRefresh, goTo, memorizePick, persistProgress, persistStreaks, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
@@ -5183,10 +5199,22 @@ function renderQuestion(app) {
     onEssaySubmit: (text) => submitEssay(app, text),
     onSelfAssess: (correct) => selfAssess(app, correct),
     onKill: () => killCurrent(app, APP_OPS), onOpenSheet: () => openSheet(app),
+    undoKill: app.lastKill || null,
+    onUndoKill: () => undoKill(app),
     onMemorizePick: () => memorizePick(app, APP_OPS), // US-42：背题点选 → 揭示 + 自动进下一题
     onContinueRound: () => continueRound(app, APP_OPS), onRestartRound: () => restartRound(app, APP_OPS), onHome: () => exitGroup(app),
   }));
 }
+/** 撤销上一次斩题（练习面横幅上的「撤销」，2026-11-01 治手误）：恢复该题并重进本组，题回到池子里。 */
+function undoKill(app) {
+  const qid = app.lastKill;
+  if (!qid || !app.group) return;
+  const group = { mode: app.group.mode, type: app.group.type };
+  app.lastKill = null;
+  app.notice = null;
+  restoreQuestion(app, qid).then(() => enterGroup(app, group.mode, group.type, APP_OPS));
+}
+
 
 function move(app, delta) {
   const next = app.index + delta;
@@ -5358,4 +5386,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.7.0";
+window.EXAM_MEMO_VERSION="1.8.0";
