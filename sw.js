@@ -1,5 +1,5 @@
 // 生成物 —— 由 tools/build.mjs 生成，请勿手改
-const CACHE_NAME = 'exam-memo-f4bba49d';
+const CACHE_NAME = 'exam-memo-c1f3096d';
 const PRECACHE = [
   "./",
   "./index.html",
@@ -28,10 +28,23 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+  const request = event.request;
+  // 导航请求 = 联网优先（US-41）：联网时打开就是最新版；断网回退缓存
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request).then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+        return response;
+      }).catch(() => caches.match(request).then((hit) => hit || caches.match('./index.html'))),
+    );
+    return;
+  }
+  // 其余静态资源 = 缓存优先（命中即返回；未命中走网络并写回）
   event.respondWith(
-    caches.match(event.request).then((hit) => hit || fetch(event.request).then((response) => {
+    caches.match(request).then((hit) => hit || fetch(request).then((response) => {
       const copy = response.clone();
-      caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+      caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
       return response;
     }).catch(() => caches.match('./index.html'))),
   );
