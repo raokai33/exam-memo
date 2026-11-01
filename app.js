@@ -790,25 +790,6 @@ async function openStore(options) {
         for (const key of keys) await impl.del(key);
       });
     },
-    /** 备份：读出存储里的全部键（题库分片 / 进度 / 错题本 / 斩题 / 界面偏好）——US-40。 */
-    async exportAll() {
-      return await run(async (impl) => {
-        const keys = await impl.keys();
-        const entries = {};
-        for (const key of keys) {
-          if (key === '__probe__') continue;
-          const value = await impl.get(key);
-          if (value !== undefined) entries[key] = value;
-        }
-        return entries;
-      });
-    },
-    /** 恢复：逐键写回（覆盖同名键，不动备份里没有的键）——US-40。 */
-    async importAll(entries) {
-      await run(async (impl) => {
-        for (const key of Object.keys(entries || {})) await impl.set(key, entries[key]);
-      });
-    },
     describe() {
       const name = backends[index].name;
       return {
@@ -3288,10 +3269,19 @@ function poolFor(questions, type, killed) {
 }
 
 /** 抽题池合计（入口 disabled 判据：合计 0 → 入口禁用，§2.11.8 ②）；已斩题不计数。 */
-function examPoolTotal(questions, killed) {
+function examPoolTotal(questions, killed, examType) {
   let total = 0;
-  for (const [type] of EXAM_PLAN) total += poolFor(questions, type, killed).length;
+  for (const [type] of planFor(examType)) total += poolFor(questions, type, killed).length;
   return total;
+}
+
+/** 考试题型可选项（US-45）：`all` = 全部按配比；否则只考那一种题型。 */
+const EXAM_TYPE_LABELS = { all: '全部', single: '单选', multi: '多选', judge: '判断', fill: '填空', essay: '简答' };
+
+/** 本次卷面的题型配比（US-45）：`all`/空 = 标准配比；指定题型 = 只取那一项。 */
+function planFor(examType) {
+  if (!examType || examType === 'all') return EXAM_PLAN;
+  return EXAM_PLAN.filter(([type]) => type === examType);
 }
 
 /** 已答判据（§2.11.8 ④，写死）：选择 / 判断有选择；填空至少一空非空（去空白）；简答文本去空白后非空。 */
@@ -3347,12 +3337,12 @@ function answeredQids(questions, paper, answers) {
  * 抽题（§2.11.8 ①，写死）：逐题型做部分 Fisher–Yates 选前 k 题（k = min(配比, 池大小)，k ≥ n 时全取）；
  * 随机只决定「抽哪些」——卷面顺序恒为 EXAM_PLAN 题型序 → 同题型源表序（AC-40）。
  */
-function drawExam(questions, random, killed) {
+function drawExam(questions, random, killed, examType) {
   const pick = typeof random === 'function' ? random : Math.random;
   const qids = [];
   const perType = {};
   const missing = {};
-  for (const [type, quota] of EXAM_PLAN) {
+  for (const [type, quota] of planFor(examType)) {
     const pool = poolFor(questions, type, killed); // 单一池判据（§2.11.10）；抽完按源内序还原卷面顺序
     const count = Math.min(quota, pool.length);
     for (let i = 0; i < count; i += 1) {
@@ -3421,7 +3411,7 @@ function formatRemaining(ms) {
   return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
 }
 
-__MODULES__["src/core/exam.mjs"] = { examView: examView, poolFor: poolFor, examPoolTotal: examPoolTotal, hasAnswer: hasAnswer, describeResponse: describeResponse, answeredQids: answeredQids, drawExam: drawExam, scoreExam: scoreExam, pendingEssayIndexes: pendingEssayIndexes, formatRemaining: formatRemaining, EXAM_PLAN: EXAM_PLAN, EXAM_TOTAL: EXAM_TOTAL, EXAM_DURATION_MS: EXAM_DURATION_MS, EXAM_TICK_MS: EXAM_TICK_MS, EXAM_STATE_VERSION: EXAM_STATE_VERSION, EXAM_EXCLUDED_MARKS: EXAM_EXCLUDED_MARKS };
+__MODULES__["src/core/exam.mjs"] = { examView: examView, poolFor: poolFor, examPoolTotal: examPoolTotal, planFor: planFor, hasAnswer: hasAnswer, describeResponse: describeResponse, answeredQids: answeredQids, drawExam: drawExam, scoreExam: scoreExam, pendingEssayIndexes: pendingEssayIndexes, formatRemaining: formatRemaining, EXAM_PLAN: EXAM_PLAN, EXAM_TOTAL: EXAM_TOTAL, EXAM_DURATION_MS: EXAM_DURATION_MS, EXAM_TICK_MS: EXAM_TICK_MS, EXAM_STATE_VERSION: EXAM_STATE_VERSION, EXAM_EXCLUDED_MARKS: EXAM_EXCLUDED_MARKS, EXAM_TYPE_LABELS: EXAM_TYPE_LABELS };
 }());
 (function () {
 // 斩题动作与「已斩题」恢复面（US-34 / §2.11.10 / KD-38 / KD-44）。
@@ -3463,7 +3453,8 @@ async function killCurrent(app, ops) {
   if (!qid || !app.group) return;
   ops.cancelAdvance(app); // 改定位 / 换题前先取消在用排程（自动前进 / 背题揭示）
   await killQuestion(app, qid);
-  app.notice = '已斩 · 可在首页恢复';
+  // 2026-11-01 用户裁：背题模式斩题不弹「已斩 · 可在首页恢复」（翻卡时提示反而打断）；练习模式不变
+  app.notice = app.group.mode === 'memorize' ? null : '已斩 · 可在首页恢复';
   app.round = ops.dropFromRound(app.round, qid);
   app.order = app.roundReplay ? app.order.filter((id) => id !== qid) : orderFor(app, app.group.mode, app.group.type);
   if (app.order.length === 0) { app.index = 0; ops.resetQuestionState(app); ops.render(app); return; }
@@ -3705,7 +3696,7 @@ function createExamFlow(options) {
 /** 抽题开考（新的一卷）：配比走 EXAM_PLAN；池空 → 空态（不白屏）。 */
 function startExam(app, flow) {
   const state = flow.state;
-  const paper = drawExam((app.bank && app.bank.questions) || [], app.random, app.killed);
+  const paper = drawExam((app.bank && app.bank.questions) || [], app.random, app.killed, app.uiState && app.uiState.examType);
   const startedAt = app.nowMs();
   Object.assign(state, {
     paper: { qids: paper.qids, total: paper.total }, saved: null, answers: {}, selfAssess: {}, index: 0,
@@ -3868,7 +3859,7 @@ function updateBars(app, flow) {
   let answered = 0;
   for (const qid of state.paper.qids) if (hasAnswer(app.questionIndex.get(qid), state.answers[qid])) answered += 1;
   if (flow.refs.remaining) flow.refs.remaining.textContent = `剩余 ${formatRemaining(state.deadline - app.nowMs())}`;
-  if (flow.refs.progress) flow.refs.progress.textContent = `第 ${state.index + 1} / ${state.paper.total} 题 · 已答 ${answered} / ${state.paper.total}`;
+  if (flow.refs.progress) flow.refs.progress.textContent = `第 ${state.index + 1} / ${state.paper.total} 题 · 已答 ${answered}`;
 }
 
 // —— 持久化（exam:current 是考试唯一的写入面，§2.11.8 ⑨ / KD-31） ——
@@ -4536,121 +4527,47 @@ function cycleFont(app, ops) {
   ops.render(app);
 }
 
-__MODULES__["src/ui/ui-ops.mjs"] = { toggleUnmasteredOnly: toggleUnmasteredOnly, toggleShuffled: toggleShuffled, dismissInstallHint: dismissInstallHint, cycleFont: cycleFont };
-}());
-(function () {
-// 数据备份 / 恢复（US-40 / §2.11.15）：本机存储 ↔ 一个 JSON 文件。
-// 为什么需要：浏览器按**网址**隔离存储——换设备、换网址（含 GitHub Pages）时，题库与进度不会自己跟过去。
-const { el } = __MODULES__["src/ui/dom.mjs"];
-
-const BACKUP_APP = 'exam-memo';
-const BACKUP_VERSION = 1;
-const BACKUP_NAME = 'exam-memo-backup';
-
-/** 备份体（纯函数，可单测）。 */
-function buildBackup(entries, exportedAt) {
-  return { app: BACKUP_APP, version: BACKUP_VERSION, exportedAt, entries };
+/**
+ * 练习 / 背题切标签（US-46 / §2.21 B 四步）：① 记住当前标签的滚动位置 → ② 按新标签派生两面板 `hidden`
+ * → ③ 换标签选中态（`aria-selected` + `data-on`）→ ④ 写回新标签上次的位置。
+ * 只改界面：不重绘（重绘会丢滚动位置）、不跳页、零存储写入——`ops` 形参取出不用是有意的，
+ * 仅为与同文件其余首页动作同形（本动作没有任何宿主副作用）。
+ * 取节点路径写死；查不到节点即渲染坏了——这里不兜底、不静默跳过（§2.21 B）。
+ */
+function switchHomeTab(app, tab, ops) {
+  app.homeScroll[app.homeTab] = app.scroll.read();
+  app.homeTab = tab;
+  for (const panel of app.root.querySelectorAll('section.matrix-group[data-mode]')) {
+    const mode = panel.dataset.mode;
+    if (mode === 'practice' || mode === 'memorize') panel.hidden = mode !== tab; // 考试块的 data-mode="exam" 按值排除
+  }
+  const tabs = app.root.querySelector('[data-home-tabs]');
+  for (const button of tabs.querySelectorAll('.tab[data-tab]')) {
+    const on = button.dataset.tab === tab;
+    button.setAttribute('aria-selected', on ? 'true' : 'false');
+    if (on) button.dataset.on = 'true';
+    else delete button.dataset.on;
+  }
+  app.scroll.write(app.homeScroll[tab]);
 }
 
-/** 校验备份体（纯函数）：形状不对直接抛错——**不猜、不部分导入**。 */
-function parseBackup(text) {
-  let data = null;
-  try { data = JSON.parse(text); } catch (err) { throw new Error('不是有效的 JSON 文件'); }
-  if (!data || data.app !== BACKUP_APP) throw new Error('不是本应用的备份文件');
-  if (data.version !== BACKUP_VERSION) throw new Error(`备份版本不支持（${data.version}）`);
-  if (!data.entries || typeof data.entries !== 'object') throw new Error('备份内容缺失');
-  return data;
+/** 选考试题型（US-45）：写 uiState 并重绘首页——下次开考按所选题型抽题。 */
+function setExamType(app, type, ops) {
+  app.uiState = Object.assign({}, app.uiState, { examType: type });
+  saveUiState(app);
+  ops.render(app);
 }
 
-function stamp(date) {
-  const d = date || new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
-}
-
-function download(name, text) {
-  const blob = new Blob([text], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = name;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
-}
-
-async function runExport(app, refresh) {
-  const entries = await app.store.exportAll();
-  download(`${BACKUP_NAME}-${stamp()}.json`, JSON.stringify(buildBackup(entries, new Date().toISOString())));
-  app.notice = `已备份 ${Object.keys(entries).length} 项（文件在「下载」里）`;
-  refresh();
-}
-
-function pickFile(app, refresh) {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = 'application/json,.json';
-  input.style.display = 'none';
-  input.onchange = async () => {
-    const file = input.files && input.files[0];
-    if (input.parentNode) input.parentNode.removeChild(input);
-    if (!file) return;
-    try {
-      const payload = parseBackup(await file.text());
-      const count = Object.keys(payload.entries).length;
-      if (typeof globalThis.confirm === 'function'
-        && !globalThis.confirm(`导入 ${count} 项会覆盖当前数据（会先自动备份当前数据）。继续？`)) return;
-      const current = await app.store.exportAll();
-      download(`${BACKUP_NAME}-before-restore-${stamp()}.json`, JSON.stringify(buildBackup(current, new Date().toISOString())));
-      await app.store.importAll(payload.entries);
-      app.notice = '已恢复，正在重新载入…';
-      refresh();
-      if (globalThis.location && typeof globalThis.location.reload === 'function') {
-        setTimeout(() => globalThis.location.reload(), 600);
-      }
-    } catch (err) {
-      app.notice = `恢复失败：${err.message}`;
-      refresh();
-    }
-  };
-  document.body.appendChild(input);
-  input.click();
-}
-
-/** 首页末块：备份 / 恢复（`data-backup-block` 供机检定位）。 */
-function backupBlock(app, refresh) {
-  return el('section', { class: 'backup-block', dataset: { backupBlock: 'true' } }, [
-    el('h2', { class: 'matrix-title', text: '数据备份' }),
-    el('p', {
-      class: 'matrix-hint',
-      text: '换手机 / 换网址前先点「备份」；到新地址点「恢复」选这个文件。备份里含题库与全部进度。',
-    }),
-    el('div', { class: 'actions' }, [
-      el('button', {
-        class: 'btn btn-primary backup-export',
-        type: 'button',
-        text: '备份',
-        on: { click: () => { runExport(app, refresh).catch((err) => { app.notice = `备份失败：${err.message}`; refresh(); }); } },
-      }),
-      el('button', {
-        class: 'btn backup-import',
-        type: 'button',
-        text: '恢复',
-        on: { click: () => pickFile(app, refresh) },
-      }),
-    ]),
-    // 版本号（§2.12.6）：手机上一眼就能看出当前是不是最新构建
-    el('p', { class: 'matrix-hint version-line', dataset: { versionLine: 'true' },
-      text: `版本 v${globalThis.EXAM_MEMO_VERSION || '0.0.0'}` }),
-  ]);
-}
-
-__MODULES__["src/ui/backup.mjs"] = { buildBackup: buildBackup, parseBackup: parseBackup, backupBlock: backupBlock };
+__MODULES__["src/ui/ui-ops.mjs"] = { toggleUnmasteredOnly: toggleUnmasteredOnly, toggleShuffled: toggleShuffled, dismissInstallHint: dismissInstallHint, cycleFont: cycleFont, switchHomeTab: switchHomeTab, setExamType: setExamType };
 }());
 (function () {
 // 入口矩阵与统计（设计档 §2.11.1 / §2.11.6 / §2.11.11 / §2.11.13：15 个入口 + 掌握度 meta + 三个集合型入口 + 两个开关）。
 // R6 / R8 / R9 / R16 / R18 / R20 / US-34 / US-35 / US-38。
 
-const { EXAM_DURATION_MS, EXAM_TOTAL, examPoolTotal } = __MODULES__["src/core/exam.mjs"];
+const { EXAM_DURATION_MS, EXAM_TYPE_LABELS, EXAM_TOTAL, examPoolTotal, planFor } = __MODULES__["src/core/exam.mjs"];
+
+/** 考试题型可选值（US-45）：全部 / 单选 / 多选 / 判断 / 填空 / 简答。 */
+const EXAM_TYPE_OPTIONS = ['all', 'single', 'multi', 'judge', 'fill', 'essay'];
 const { isCollection, MEMORIZE_TYPES, MODE_LABELS, NUMBERS, PRACTICE_TYPES, TYPE_LABELS, WEAK, WRONGBOOK } = __MODULES__["src/core/progress.mjs"];
 const { add, clear, el } = __MODULES__["src/ui/dom.mjs"];
 const { FONT_LABELS } = __MODULES__["src/ui/font.mjs"];
@@ -4659,6 +4576,9 @@ const MODE_HINTS = {
   memorize: '看题 → 一次给全，不判分',
   practice: '作答 → 立即判对错',
 };
+
+/** 首页两个标签（US-46）：练习在前、背题在后；练习为默认活动标签（§2.21 A）。 */
+const HOME_TABS = [['practice', '练习'], ['memorize', '背题']];
 
 /** iOS 且非主屏全屏打开时，提示一次「分享 → 添加到主屏幕」（可关闭，§2.11.4）。 */
 function shouldShowInstallHint(ui) {
@@ -4742,12 +4662,19 @@ function renderEntryMatrix(container, view) {
     return;
   }
 
-  // R27 / R29（§2.11.1 / KD-27）：区块顺序 = 练习区 → 模拟考试 → 背题区；
-   // 「模拟考试」为独立区块，不计入 15 个入口（§2.11.8 入口与位次）。
+  // US-46（§2.21 A）：标签条 → 模拟考试 → 练习面板 / 背题面板 → 页尾动作行 → 已斩块 → 版本号。
+  // 「模拟考试」为独立区块，不计入 15 个入口（§2.11.8）；两个面板常驻 DOM、未选中者 `hidden`。
+  screen.appendChild(renderHomeTabs(view));
+  screen.appendChild(renderExamBlock(view));
   for (const mode of ['practice', 'memorize']) {
-    const group = el('section', { class: 'matrix-group', dataset: { mode } });
-    group.appendChild(el('h2', { class: 'matrix-title', text: `${MODE_LABELS[mode]}　` }));
-    group.appendChild(el('p', { class: 'matrix-hint', text: MODE_HINTS[mode] }));
+    // 面板 `hidden` 由视图状态派生（重绘后不漂，§2.21 A）
+    const panel = el('section', {
+      class: 'matrix-group',
+      dataset: { mode },
+      hidden: (view.homeTab || 'practice') !== mode,
+    });
+    panel.appendChild(el('h2', { class: 'matrix-title', text: `${MODE_LABELS[mode]}　` }));
+    panel.appendChild(el('p', { class: 'matrix-hint', text: MODE_HINTS[mode] }));
     const types = mode === 'practice' ? PRACTICE_TYPES : MEMORIZE_TYPES;
     const grid = el('div', { class: 'matrix-grid' });
     for (const type of types) {
@@ -4758,29 +4685,55 @@ function renderEntryMatrix(container, view) {
         onEnter: view.onEnter,
       }));
     }
-    group.appendChild(grid);
-    // 掌握度开关与三个集合型入口只挂在练习区（§2.11.1 / §2.11.4）
-    if (mode === 'practice') group.appendChild(renderPracticeExtras(view));
-    screen.appendChild(group);
-    if (mode === 'practice') screen.appendChild(renderExamBlock(view)); // 练习区 → 模拟考试 → 背题区
+    panel.appendChild(grid);
+    // 掌握度开关与三个集合型入口只挂在练习面板（§2.11.1 / §2.11.4）
+    if (mode === 'practice') panel.appendChild(renderPracticeExtras(view));
+    screen.appendChild(panel);
   }
+  // 低频动作收进页尾：导入题库（换库时才用）与「清空已掌握」同排（§2.21 A 第 6 块）
+  screen.appendChild(renderPageActions(view));
+  // 「已斩题」区块（US-34 / KD-44）：页尾动作行之后、版本号之前
+  screen.appendChild(renderKilledBlock(view));
+  // 页尾版本号（构建注入的内容指纹）：手机与仓库对一眼即知新旧（修复「滑掉不更新」无法自查）
+  if (view.version) screen.appendChild(el('p', { class: 'page-version', text: `版本 ${view.version}` }));
 
-  screen.appendChild(el('div', { class: 'actions' }, [
+  add(container, screen);
+}
+
+/** 练习 / 背题标签条（§2.21 A 第 2 块）：活动态 = `aria-selected` + `data-on`；点一下只切面板、不重绘（§2.21 B）。 */
+function renderHomeTabs(view) {
+  const active = view.homeTab || 'practice';
+  return el('div', { class: 'home-tabs', dataset: { homeTabs: 'true' } }, HOME_TABS.map(([tab, label]) => {
+    const on = tab === active;
+    return el('button', {
+      class: 'btn tab',
+      type: 'button',
+      text: label,
+      'aria-selected': on ? 'true' : 'false',
+      dataset: on ? { tab, on: 'true' } : { tab },
+      on: { click: () => view.onSwitchHomeTab(tab) },
+    });
+  }));
+}
+
+/** 页尾动作行（§2.21 A 第 6 块）：`data-page-actions` 供机检定位（空库态的那行 `.actions` 不带）。 */
+function renderPageActions(view) {
+  const wrongSummary = view.summaryOf('practice', WRONGBOOK);
+  return el('div', { class: 'actions', dataset: { pageActions: 'true' } }, [
     el('button', {
       class: 'btn import-button',
       type: 'button',
       text: '导入题库',
       on: { click: view.onImport },
     }),
-  ]));
-  // 「已斩题」区块（US-34 / KD-44）：入口矩阵的末块——背题区之后；前三块的 data-mode 序列一位不动
-  screen.appendChild(renderKilledBlock(view));
-  // 数据备份 / 恢复（US-40）：整页最后一块
-  if (view.backup) screen.appendChild(view.backup);
-  // 低频动作收进页尾：导入题库（换库时才用）不再夹在入口区中间
-
-
-  add(container, screen);
+    el('button', {
+      class: 'btn btn-ghost clear-mastered',
+      type: 'button',
+      text: '清空已掌握',
+      disabled: wrongSummary.total === 0,
+      on: { click: view.onClearMastered },
+    }),
+  ]);
 }
 
 /** 「已斩 N 题」= 末块（`data-killed-block` 供机检定位）；为空时按钮禁用并写明「暂无已斩题」。 */
@@ -4805,53 +4758,52 @@ function renderKilledBlock(view) {
  */
 function renderExamBlock(view) {
   const questions = (view.bank && view.bank.questions) || [];
+  const current = view.examType || 'all';
+  const target = planFor(current).reduce((sum, [, quota]) => sum + quota, 0);
+  const types = el('div', { class: 'switch-row exam-types' }, EXAM_TYPE_OPTIONS.map((value) => el('button', {
+    class: `btn exam-type${current === value ? ' on' : ''}`,
+    type: 'button',
+    text: EXAM_TYPE_LABELS[value],
+    dataset: { examType: value },
+    on: { click: () => view.onSelectExamType(value) },
+  })));
   return el('section', { class: 'matrix-group exam-block', dataset: { mode: 'exam' } }, [
     el('h2', { class: 'matrix-title', text: '模拟考试' }),
-    el('p', { class: 'matrix-hint', text: '按题型抽题成卷，限时作答；交卷后给总分、逐题对错与错题清单。' }),
+    el('p', { class: 'matrix-hint', text: '按题型抽题成卷，限时作答；交卷后给总分与逐题对错。' }),
+    types,
     el('button', {
       class: 'btn exam-entry',
       type: 'button',
       dataset: { examEntry: 'true' },
-      disabled: examPoolTotal(questions, view.killed) === 0,
+      disabled: examPoolTotal(questions, view.killed, current) === 0,
       on: { click: () => view.onOpenExam() },
     }, [
       el('span', { class: 'entry-label', text: '开始考试' }),
-      el('span', { class: 'entry-meta', text: `${EXAM_TOTAL} 题 · ${EXAM_DURATION_MS / 60000} 分钟` }),
+      el('span', { class: 'entry-meta', text: `${target} 题 · ${EXAM_DURATION_MS / 60000} 分钟` }),
     ]),
   ]);
 }
 
-/** 练习区附加区：两个开关 + 错题本（含清空已掌握）+ 数字专项 + 易错题（第 15 个入口）。 */
+/** 练习面板附加区：集合行（错题本 / 数字专项 / 易错题并排）+ 两开关（集合行下方一行，§2.21 A）。 */
 function renderPracticeExtras(view) {
   const extras = el('div', { class: 'practice-extras' });
+  // 三个集合型入口并成一行：复用既有的一行式入口布局（`.collection-row`，§2.21 C / G）
+  extras.appendChild(el('div', { class: 'collection-row' }, [
+    entryButton({
+      mode: 'practice', type: WRONGBOOK, summary: view.summaryOf('practice', WRONGBOOK), onEnter: view.onEnter,
+    }),
+    entryButton({
+      mode: 'practice', type: NUMBERS, summary: view.summaryOf('practice', NUMBERS), onEnter: view.onEnter,
+    }),
+    entryButton({
+      mode: 'practice', type: WEAK, summary: view.summaryOf('practice', WEAK), onEnter: view.onEnter,
+    }),
+  ]));
+  // 两开关留在练习面板内、集合行下方一行（只作用练习组，KD-21）
   extras.appendChild(el('div', { class: 'switch-row' }, [
     switchButton('只练没掌握的', 'toggle-unmastered', isOn(view, 'practiceUnmasteredOnly'), view.onToggleUnmasteredOnly),
     switchButton('乱序', 'toggle-shuffled', isOn(view, 'practiceShuffled'), view.onToggleShuffled),
   ]));
-
-  const wrongSummary = view.summaryOf('practice', WRONGBOOK);
-  extras.appendChild(el('div', { class: 'wrongbook-row' }, [
-    entryButton({ mode: 'practice', type: WRONGBOOK, summary: wrongSummary, onEnter: view.onEnter }),
-    el('button', {
-      class: 'btn btn-ghost clear-mastered',
-      type: 'button',
-      text: '清空已掌握',
-      disabled: wrongSummary.total === 0,
-      on: { click: view.onClearMastered },
-    }),
-  ]));
-  extras.appendChild(entryButton({
-    mode: 'practice',
-    type: NUMBERS,
-    summary: view.summaryOf('practice', NUMBERS),
-    onEnter: view.onEnter,
-  }));
-  extras.appendChild(entryButton({
-    mode: 'practice',
-    type: WEAK,
-    summary: view.summaryOf('practice', WEAK),
-    onEnter: view.onEnter,
-  }));
   return extras;
 }
 
@@ -4935,8 +4887,7 @@ const { clearMastered } = __MODULES__["src/ui/wrongbook-ops.mjs"];
 const { enterGroup, goTo, memorizePick, persistProgress, persistStreaks, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
 const { cardView, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
 const { continueRound, dropFromRound, restartRound } = __MODULES__["src/ui/round-ops.mjs"];
-const { cycleFont, dismissInstallHint, toggleShuffled, toggleUnmasteredOnly } = __MODULES__["src/ui/ui-ops.mjs"];
-const { backupBlock } = __MODULES__["src/ui/backup.mjs"];
+const { cycleFont, dismissInstallHint, setExamType, switchHomeTab, toggleShuffled, toggleUnmasteredOnly } = __MODULES__["src/ui/ui-ops.mjs"];
 const { renderEntryMatrix } = __MODULES__["src/ui/stats.mjs"];
 
 /** 答对多少次自动斩（US-44）：写死 3——用户口径「连续三次做对就斩」。 */
@@ -4949,6 +4900,12 @@ const WRONG_HOLD_MS = 2000;
 
 /** 背题延迟揭示时长（毫秒）：先给题干与选项原文，到点后补上正确项与答案原文（R24 / §2.11.7②）。 */
 const MEMORIZE_REVEAL_MS = 2000;
+
+/** 滚动位置读写注入缝（§2.21 B）：宿主没有 scrollY / scrollTo 时读 0、写空操作（呈现面，业务结果不变）。 */
+const DEFAULT_SCROLL = {
+  read: () => (typeof globalThis.scrollY === 'number' ? globalThis.scrollY : 0),
+  write: (y) => { if (typeof globalThis.scrollTo === 'function') globalThis.scrollTo(0, y); },
+};
 
 /** 挂载界面（打包产物暴露为 window.EXAM_MEMO.mount）。 */
 async function mount(rootEl, options) {
@@ -4981,6 +4938,8 @@ async function mount(rootEl, options) {
     nowMs: typeof opts.now === 'function' ? opts.now : Date.now, // 考试计时注入缝（§2.4.2）
     random: typeof opts.random === 'function' ? opts.random : Math.random, // 考试抽题注入缝
     questionIndex: new Map(),
+    homeTab: 'practice', homeScroll: { practice: 0, memorize: 0 }, // US-46：标签与各标签滚动位置（仅内存）
+    scroll: opts.scroll || DEFAULT_SCROLL, // 滚动读写注入缝（§2.21 B）
     flow: null, exam: null, uiState: null, notice: null, noticeAt: null,
     importMs: 0, renderMs: 0, readyMs: 0,
   };
@@ -5033,9 +4992,10 @@ function renderMatrix(app) {
     onEnter: (mode, type) => enterGroup(app, mode, type, APP_OPS),
     onImport: () => openImport(app),
     onOpenExam: () => { openExam(app, render); }, // R29：模拟考试入口（§2.11.8）
+    examType: (app.uiState && app.uiState.examType) || 'all', // US-45：考试题型选择
+    onSelectExamType: (type) => setExamType(app, type, APP_OPS),
     killed: app.killed, // US-34：「已斩 N 题」末块 + 考试池 disabled 判据
     onOpenKilled: () => { app.view = 'killed'; render(app); },
-    backup: backupBlock(app, () => render(app)), // US-40：备份 / 恢复（换设备 / 换网址搬数据）
     onClearMastered: () => clearMastered(app, APP_OPS),
     onToggleUnmasteredOnly: () => toggleUnmasteredOnly(app, APP_OPS),
     onToggleShuffled: () => toggleShuffled(app, APP_OPS),
@@ -5043,6 +5003,9 @@ function renderMatrix(app) {
     onCycleFont: () => cycleFont(app, APP_OPS),
     ui: app.uiState,
     notice: app.notice,
+    homeTab: app.homeTab, // US-46：面板 `hidden` 由它派生（§2.21 A）
+    onSwitchHomeTab: (tab) => switchHomeTab(app, tab, APP_OPS),
+    version: (typeof window !== 'undefined' && window.EXAM_MEMO_VERSION) || '', // 构建注入的内容指纹（页尾版本号来源）
     onDismissInstallHint: () => dismissInstallHint(app, APP_OPS),
   });
 }
@@ -5290,4 +5253,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.2.1";
+window.EXAM_MEMO_VERSION="1.3.0";
