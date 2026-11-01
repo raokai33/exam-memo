@@ -4902,7 +4902,7 @@ function renderExamBlock(view) {
   ]);
 }
 
-/** 练习面板附加区：集合行（错题本 / 数字专项 / 易错题并排）+ 两开关（集合行下方一行，§2.21 A）。 */
+/** 练习面板附加区：集合行（错题本 / 易错题 / 数字专项并排）+ 两开关（集合行下方一行，§2.21 A）。 */
 function renderPracticeExtras(view) {
   const extras = el('div', { class: 'practice-extras' });
   // 三个集合型入口并成一行：复用既有的一行式入口布局（`.collection-row`，§2.21 C / G）
@@ -4911,10 +4911,10 @@ function renderPracticeExtras(view) {
       mode: 'practice', type: WRONGBOOK, summary: view.summaryOf('practice', WRONGBOOK), onEnter: view.onEnter,
     }),
     entryButton({
-      mode: 'practice', type: NUMBERS, summary: view.summaryOf('practice', NUMBERS), onEnter: view.onEnter,
+      mode: 'practice', type: WEAK, summary: view.summaryOf('practice', WEAK), onEnter: view.onEnter,
     }),
     entryButton({
-      mode: 'practice', type: WEAK, summary: view.summaryOf('practice', WEAK), onEnter: view.onEnter,
+      mode: 'practice', type: NUMBERS, summary: view.summaryOf('practice', NUMBERS), onEnter: view.onEnter,
     }),
   ]));
   // 两开关留在练习面板内、集合行下方一行（只作用练习组，KD-21）
@@ -5386,4 +5386,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.8.0";
+window.EXAM_MEMO_VERSION="1.8.1";
