@@ -3225,8 +3225,8 @@ const { hash32 } = __MODULES__["src/core/progress.mjs"];
 const { grade } = __MODULES__["src/core/grade.mjs"];
 
 /** 卷面配比（写死；数组顺序 = 卷面题型顺序）。 */
-const EXAM_PLAN = [['single', 10], ['multi', 5], ['judge', 10], ['fill', 10], ['essay', 4]];
-const EXAM_TOTAL = 39;
+const EXAM_PLAN = [['single', 13], ['multi', 6], ['judge', 13], ['fill', 13], ['essay', 5]];
+const EXAM_TOTAL = 50;
 /** 限时 30 分钟（D20）。 */
 const EXAM_DURATION_MS = 1800000;
 const EXAM_TICK_MS = 1000;
@@ -3300,14 +3300,14 @@ function examPoolTotal(questions, killed, examType, examCount) {
 /** 考试题型可选项（US-45）：`all` = 全部按配比；否则只考那一种题型。 */
 const EXAM_TYPE_LABELS = { all: '全部', single: '单选', multi: '多选', judge: '判断', fill: '填空', essay: '简答' };
 
-/** 考试题数档（US-47，2026-11-01 用户要求）：10 / 20 / 39（标准）/ 全部。 */
-const EXAM_COUNT_PRESETS = [10, 20, 39, 'all'];
-const EXAM_COUNT_LABELS = { 10: '10 题', 20: '20 题', 39: '39 题', all: '全部' };
-/** 每档的题型配比：10 / 20 为等比缩小的写死配比；39 = 标准；全部 = 每型全抽。 */
+/** 考试题数档（US-47，2026-11-01 用户要求）：10 / 20 / 50（标准）/ 全部。 */
+const EXAM_COUNT_PRESETS = [10, 20, 50, 'all'];
+const EXAM_COUNT_LABELS = { 10: '10 题', 20: '20 题', 50: '50 题', all: '全部' };
+/** 每档的题型配比：10 / 20 为等比缩小的写死配比；50 = 标准；全部 = 每型全抽。 */
 const EXAM_PLAN_BY_COUNT = {
   10: [['single', 3], ['multi', 1], ['judge', 3], ['fill', 2], ['essay', 1]],
   20: [['single', 5], ['multi', 3], ['judge', 5], ['fill', 5], ['essay', 2]],
-  39: EXAM_PLAN,
+  50: EXAM_PLAN,
   all: [['single', Infinity], ['multi', Infinity], ['judge', Infinity], ['fill', Infinity], ['essay', Infinity]],
 };
 
@@ -3315,7 +3315,7 @@ const EXAM_PLAN_BY_COUNT = {
  *  - 题型 = 全部：按题数档取配比（10 / 20 等比缩小、39 标准、全部 = 每型抽满）；
  *  - 题型 = 某一类：题数档就是该型的题数（选「单选 + 10 题」= 10 道单选）。 */
 function planFor(examType, examCount) {
-  const key = examCount === undefined || examCount === null ? 39 : examCount;
+  const key = examCount === undefined || examCount === null ? 50 : examCount;
   if (!examType || examType === 'all') return EXAM_PLAN_BY_COUNT[key] || EXAM_PLAN;
   return [[examType, key === 'all' ? Infinity : Number(key)]];
 }
@@ -3453,6 +3453,50 @@ function formatRemaining(ms) {
 }
 
 __MODULES__["src/core/exam.mjs"] = { examView: examView, poolFor: poolFor, examPoolTotal: examPoolTotal, planFor: planFor, planTotal: planTotal, hasAnswer: hasAnswer, describeResponse: describeResponse, answeredQids: answeredQids, drawExam: drawExam, scoreExam: scoreExam, pendingEssayIndexes: pendingEssayIndexes, formatRemaining: formatRemaining, EXAM_PLAN: EXAM_PLAN, EXAM_TOTAL: EXAM_TOTAL, EXAM_DURATION_MS: EXAM_DURATION_MS, EXAM_TICK_MS: EXAM_TICK_MS, EXAM_STATE_VERSION: EXAM_STATE_VERSION, EXAM_EXCLUDED_MARKS: EXAM_EXCLUDED_MARKS, EXAM_TYPE_LABELS: EXAM_TYPE_LABELS, EXAM_COUNT_PRESETS: EXAM_COUNT_PRESETS, EXAM_COUNT_LABELS: EXAM_COUNT_LABELS, EXAM_PLAN_BY_COUNT: EXAM_PLAN_BY_COUNT };
+}());
+(function () {
+// 考试计时与「答完自动切题」（§2.11.8 ③）：从 exam.mjs 拆出守 N8 行数纪律（≤400 行）。
+// 2026-11-01 用户裁：模拟考试取消倒计时 —— EXAM_TIMED=false 时 deadline=0 即「不限时」，不排 tick、不自动交卷。
+const { EXAM_TICK_MS } = __MODULES__["src/core/exam.mjs"];
+
+const EXAM_TIMED = false;
+/** 单选 / 判断作答后自动切下一题的延迟（毫秒）：用户拇指腱鞘炎，减少点击。 */
+const EXAM_ADVANCE_MS = 350;
+
+/** 排下一拍墙钟 tick（到点回调 / 每拍刷新顶栏）；不限时（deadline=0）直接跳过。 */
+function scheduleTick(app, state, onTimeout, onBar) {
+  stopTick(app, state);
+  if (!state.deadline) return;
+  state.tick = app.timers.set(() => {
+    state.tick = null;
+    if (state.phase !== 'answering') return; // 交卷 / 退出后不再走
+    if (state.deadline - app.nowMs() <= 0) { onTimeout(); return; } // 到点自动交卷（D20）
+    onBar();
+    scheduleTick(app, state, onTimeout, onBar);
+  }, EXAM_TICK_MS);
+}
+
+function stopTick(app, state) {
+  if (state.tick === null || state.tick === undefined) return;
+  app.timers.clear(state.tick);
+  state.tick = null;
+}
+
+/** 取消待执行的自动切题（手动翻页 / 退出 / 交卷时）。 */
+function clearAdvance(app, state) {
+  if (state.advance === null || state.advance === undefined) return;
+  app.timers.clear(state.advance);
+  state.advance = null;
+}
+
+/** 答完自动切下一题（末题不跳）。 */
+function scheduleAdvance(app, state, onAdvance) {
+  clearAdvance(app, state);
+  if (!state.paper || state.index >= state.paper.total - 1) return;
+  state.advance = app.timers.set(() => { state.advance = null; onAdvance(); }, EXAM_ADVANCE_MS);
+}
+
+__MODULES__["src/ui/exam-clock.mjs"] = { scheduleTick: scheduleTick, stopTick: stopTick, clearAdvance: clearAdvance, scheduleAdvance: scheduleAdvance, EXAM_TIMED: EXAM_TIMED, EXAM_ADVANCE_MS: EXAM_ADVANCE_MS };
 }());
 (function () {
 // 斩题动作与「已斩题」恢复面（US-34 / §2.11.10 / KD-38 / KD-44）。
@@ -3672,6 +3716,7 @@ __MODULES__["src/ui/exam-result.mjs"] = { resultPage: resultPage };
 // 006：结果页（含逐题核对与两个动作）迁出到 exam-result.mjs；答题页进度条可点开答题卡（US-36）。
 const { blankCountOf } = __MODULES__["src/core/answers.mjs"];
 const { TYPE_LABELS } = __MODULES__["src/core/detect.mjs"];
+const { EXAM_TIMED, clearAdvance, scheduleAdvance, scheduleTick, stopTick } = __MODULES__["src/ui/exam-clock.mjs"];
 const { answeredQids, drawExam, examView, EXAM_DURATION_MS, EXAM_STATE_VERSION, EXAM_TICK_MS, formatRemaining, hasAnswer, pendingEssayIndexes, planFor, planTotal } = __MODULES__["src/core/exam.mjs"];
 const { answerBlock, judgeRow, renderOptions } = __MODULES__["src/ui/card.mjs"];
 const { resultPage } = __MODULES__["src/ui/exam-result.mjs"];
@@ -3707,7 +3752,7 @@ function createExamFlow(options) {
   const render = options.render;
   const state = {
     phase: 'loading', paper: null, answers: {}, selfAssess: {}, index: 0, startedAt: 0, deadline: 0,
-    assessIndex: 0, saved: null, tick: null, confirm: false, notice: null, saveError: false,
+    assessIndex: 0, saved: null, tick: null, advance: null, confirm: false, notice: null, saveError: false,
     sheetOpen: false, result: null,
   };
   const flow = { state, liveInputs: [], refs: {} };
@@ -3741,13 +3786,13 @@ function startExam(app, flow) {
   const startedAt = app.nowMs();
   Object.assign(state, {
     paper: { qids: paper.qids, total: paper.total }, saved: null, answers: {}, selfAssess: {}, index: 0,
-    assessIndex: 0, confirm: false, saveError: false, startedAt, deadline: startedAt + EXAM_DURATION_MS,
+    assessIndex: 0, confirm: false, saveError: false, startedAt, deadline: EXAM_TIMED ? startedAt + EXAM_DURATION_MS : 0, advance: null,
     sheetOpen: false, result: null,
   });
   stopTick(app, state);
   if (paper.total === 0) { state.phase = 'empty'; clearRecord(app); return; } // 极端空卷 → 空态 + 返回入口
   state.phase = 'answering';
-  scheduleTick(app, flow);
+  scheduleTick(app, state, () => submitExam(app, flow), () => updateBars(app, flow));
   persistExam(app, flow);
 }
 
@@ -3771,13 +3816,14 @@ function resumeSaved(app, flow) {
     return refresh(app, flow);
   }
   state.phase = 'answering';
-  if (state.deadline - app.nowMs() <= 0) { submitExam(app, flow); return; } // 已到点：按时间到自动交卷
-  scheduleTick(app, flow);
+  if (EXAM_TIMED && state.deadline - app.nowMs() <= 0) { submitExam(app, flow); return; } // 已到点：按时间到自动交卷
+  if (state.deadline) scheduleTick(app, state, () => submitExam(app, flow), () => updateBars(app, flow));
   refresh(app, flow);
 }
 function moveCursor(app, flow, delta) {
   const state = flow.state;
   if (state.phase !== 'answering') return;
+  clearAdvance(app, state); // 手动翻页：作废未到点的自动切题
   collectCurrent(app, flow);
   const next = state.index + delta;
   if (next < 0 || next >= state.paper.total) return;
@@ -3809,6 +3855,8 @@ function pickAnswer(app, flow, payload) {
   state.answers = Object.assign({}, state.answers, { [question.id]: next });
   refresh(app, flow); // 考试中不给实时对错：只重画选择态
   persistExam(app, flow); // 每次作答变更
+  // 2026-11-01（拇指腱鞘炎）：单选 / 判断答完自动切下一题；多选不自动（可能还要补选）
+  if (question.type === 'single' || question.type === 'judge') scheduleAdvance(app, flow.state, () => moveCursor(app, flow, 1));
 }
 /** 收集当前题的文本输入（填空 / 简答）：换题、交卷、退出、写入前沿同一路径收口。
  *  只在「当前渲染的输入属于当前题」时才收（换题后旧输入未重画前不得写进新题）。 */
@@ -3876,30 +3924,14 @@ function exitExam(app, flow, render, save) {
   render(app);
 }
 
-// —— 计时（tick 单排程 + 墙钟剩余；§2.11.8 ③） ——
-function scheduleTick(app, flow) {
-  const state = flow.state;
-  stopTick(app, state);
-  state.tick = app.timers.set(() => {
-    state.tick = null;
-    if (state.phase !== 'answering') return; // 交卷 / 退出后不再走
-    if (state.deadline - app.nowMs() <= 0) { submitExam(app, flow); return; } // 到点自动交卷（D20）
-    updateBars(app, flow);
-    scheduleTick(app, flow); // 重排下一个
-  }, EXAM_TICK_MS);
-}
-function stopTick(app, state) {
-  if (state.tick === null || state.tick === undefined) return;
-  app.timers.clear(state.tick);
-  state.tick = null;
-}
+// —— 计时（tick 单排程 + 墙钟剩余；§2.11.8 ③）已拆到 exam-clock.mjs ——
 /** 顶栏就地刷新（不整体重画——避免打断正在输入的填空 / 简答）。 */
 function updateBars(app, flow) {
   const state = flow.state;
   if (!state.paper) return;
   let answered = 0;
   for (const qid of state.paper.qids) if (hasAnswer(app.questionIndex.get(qid), state.answers[qid])) answered += 1;
-  if (flow.refs.remaining) flow.refs.remaining.textContent = `剩余 ${formatRemaining(state.deadline - app.nowMs())}`;
+  if (flow.refs.remaining && state.deadline) flow.refs.remaining.textContent = `剩余 ${formatRemaining(state.deadline - app.nowMs())}`;
   if (flow.refs.progress) flow.refs.progress.textContent = `第 ${state.index + 1} / ${state.paper.total} 题 · 已答 ${answered}`;
 }
 
@@ -3956,7 +3988,9 @@ function resumePage(app, flow) {
   const record = flow.state.saved;
   const remained = Math.max(0, record.deadline - app.nowMs());
   const answered = record.qids.filter((qid) => hasAnswer(app.questionIndex.get(qid), (record.answers || {})[qid])).length;
-  const info = `上次考试进行中 · 剩余 ${Math.ceil(remained / 60000)} 分钟 · 已答 ${answered} / ${record.qids.length}`;
+  const info = EXAM_TIMED
+    ? `上次考试进行中 · 剩余 ${Math.ceil(remained / 60000)} 分钟 · 已答 ${answered} / ${record.qids.length}`
+    : `上次考试进行中 · 已答 ${answered} / ${record.qids.length}`;
   const actions = el('div', { class: 'actions' }, [
     btn('btn-primary exam-resume-continue', '继续考试', () => flow.continueSaved()),
     btn('exam-resume-restart', '重新开始（放弃上次）', () => flow.startNew()),
@@ -3967,9 +4001,10 @@ function resumePage(app, flow) {
 function answeringPage(app, flow) {
   const state = flow.state;
   const question = currentQuestion(app, flow, state.index);
-  flow.refs.remaining = span('exam-remaining', '');
+  flow.refs.remaining = EXAM_TIMED ? span('exam-remaining', '') : null;
   flow.refs.progress = btn('exam-progress', '', () => flow.openSheet()); // 进度条可点：打开答题卡（US-36）
-  const nodes = [el('header', { class: 'exam-top' }, [flow.refs.remaining, flow.refs.progress, btn('btn-ghost exam-exit', '退出', () => flow.exit())])];
+  const headKids = [flow.refs.remaining, flow.refs.progress, btn('btn-ghost exam-exit', '退出', () => flow.exit())].filter(Boolean);
+  const nodes = [el('header', { class: 'exam-top' }, headKids)];
   if (state.notice) nodes.push(el('p', { class: 'banner banner-warn exam-notice', text: state.notice }));
   if (state.saveError) nodes.push(el('p', { class: 'banner banner-warn exam-save-warn', text: '本次进度可能未保存' }));
   const target = planTotal(examTypeNow(app), countNow(app));
@@ -3980,7 +4015,7 @@ function answeringPage(app, flow) {
   return nodes;
 }
 const examTypeNow = (app) => (app.uiState && app.uiState.examType) || 'all';
-const countNow = (app) => { const c = app.uiState && app.uiState.examCount; return c === undefined || c === null ? 39 : c; };
+const countNow = (app) => { const c = app.uiState && app.uiState.examCount; return c === undefined || c === null ? 50 : c; };
 function shortfallText(app, state, target) {
   const counts = {};
   for (const qid of state.paper.qids) {
@@ -4846,7 +4881,7 @@ function renderExamBlock(view) {
       on: { click: () => view.onOpenExam() },
     }, [
       el('span', { class: 'entry-label', text: '开始考试' }),
-      el('span', { class: 'entry-meta', text: `${target} 题 · ${EXAM_DURATION_MS / 60000} 分钟` }),
+      el('span', { class: 'entry-meta', text: `${target} 题 · 不限时` }),
     ]),
   ]);
 }
@@ -5323,4 +5358,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.6.1";
+window.EXAM_MEMO_VERSION="1.7.0";
