@@ -1,10 +1,10 @@
 // 生成物 —— 由 tools/build.mjs 生成，请勿手改
-const CACHE_NAME = 'exam-memo-277c8c43';
+const CACHE_NAME = 'exam-memo-7c8b6bc9';
 const PRECACHE = [
   "./",
   "./index.html",
-  "./app.js?v=1.8.1",
-  "./style.css?v=1.8.1",
+  "./app.js?v=1.8.2",
+  "./style.css?v=1.8.2",
   "./manifest.webmanifest",
   "./icon.svg",
   "./icon-180.png",
