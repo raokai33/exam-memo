@@ -644,19 +644,6 @@ select, input[type="text"] {
   color: var(--brand);
 }
 
-/* —— 斩题二次确认（US-34） —— */
-.kill-confirm-panel {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--bg);
-}
-.kill-confirm-text {
-  font-size: 0.8824rem;
-  margin: 0 0 8px;
-}
-
 /* —— 易错 chip / 题型分布（US-35 / US-38） —— */
 .chip-weak {
   background: #fee2e2;
@@ -753,6 +740,12 @@ select, input[type="text"] {
 /* —— 已斩题区块与恢复面（US-34 / KD-44） —— */
 .killed-block {
   margin-top: 18px;
+}
+/* —— 数据备份 / 恢复（US-40） —— */
+.backup-block {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
 }
 .killed-list {
   list-style: none;
