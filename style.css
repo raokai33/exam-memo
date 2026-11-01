@@ -177,10 +177,7 @@ html, body {
   touch-action: manipulation;
 }
 .card-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 8px;
+  display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px;
 }
 .card-meta {
   display: flex;
@@ -189,6 +186,7 @@ html, body {
 }
 .card-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   flex-shrink: 0;
 }
@@ -286,6 +284,7 @@ html, body {
 }
 .blank-input {
   flex: 1;
+  min-width: 0;
   min-height: 44px;
   padding: 8px 10px;
   font-size: 0.9412rem;
@@ -612,6 +611,8 @@ select, input[type="text"] {
   margin: 0;
 }
 .sheet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
   gap: 8px;
 }
 .sheet-cell {

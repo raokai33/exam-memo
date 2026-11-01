@@ -2987,10 +2987,6 @@ function renderCard(container, view) {
     // 一次性提示（斩题：已斩 · 可在首页恢复；同首页的 notice 通道）
     view.notice ? el('p', { class: 'banner banner-warn card-notice', text: view.notice }) : null,
     el('article', { class: 'card' }, [
-      // 错题本题型分布行（US-38 / §2.11.13）：只在错题本组、chips 区之前
-      view.distribution && view.group.mode === 'practice' && view.group.type === WRONGBOOK
-        ? el('p', { class: 'type-distribution', text: distributionText(view.distribution, view.total) })
-        : null,
       head,
       body,
       // 轮次完成态面板（US-37 / §2.11.12）：接在反馈横幅之下（反馈在上、面板在下同时可见）
@@ -4671,7 +4667,7 @@ function entryButton(options) {
  */
 function entryMeta(summary, mode, type) {
   if (type === WEAK) return `易错 ${summary.total} 题`;
-  if (isCollection(type)) return collectionMeta(summary, type);
+  if (isCollection(type)) return collectionMeta(summary);
   if (summary.total === 0) return '暂无题目';
   if (mode === 'practice' && summary.mastery) {
     const mastery = summary.mastery;
@@ -4683,12 +4679,9 @@ function entryMeta(summary, mode, type) {
   return `${summary.total} 题 · ${accuracyText}`;
 }
 
-/** 集合型入口 meta：错题本多一段题型分布（空时不带分布串），其余维持「N 题」（§2.11.13）。 */
-function collectionMeta(summary, type) {
-  if (type !== WRONGBOOK || summary.total === 0 || !summary.distribution) return `${summary.total} 题`;
-  const dist = summary.distribution;
-  return `${summary.total} 题 · 单选 ${dist.single} · 多选 ${dist.multi} · 判断 ${dist.judge}`
-    + ` · 填空 ${dist.fill} · 简答 ${dist.essay}`;
+/** 集合型入口 meta：统一「N 题」（2026-11-01 用户裁：错题本不再带题型分布串；组内题型数量行同批删除）。 */
+function collectionMeta(summary) {
+  return `${summary.total} 题`;
 }
 
 // 入口矩阵的渲染到此为止：空态与矩阵两态都在上面处理。
