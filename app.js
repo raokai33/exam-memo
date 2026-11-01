@@ -4441,6 +4441,82 @@ async function clearMastered(app, ctx) {
 __MODULES__["src/ui/wrongbook-ops.mjs"] = { clearMastered: clearMastered };
 }());
 (function () {
+// 组内轮次与斩题共用的动作（US-37 / US-34）：由 app.mjs 迁出，守 N8 行数纪律。
+// 纯动作层：调用方把 APP_OPS 传进来（render / resetQuestionState 等仍由宿主提供）。
+const { roundSummary, startRound } = __MODULES__["src/core/progress.mjs"];
+const { orderFor } = __MODULES__["src/ui/groups.mjs"];
+const { goTo } = __MODULES__["src/ui/session.mjs"];
+
+/** 斩掉本轮的题：本轮题池同步收敛（池 = 可见题组，完成判定才可达）。斩题与「移出本题」共用同一语义。 */
+function dropFromRound(round, qid) {
+  if (!round || round.ids.indexOf(qid) < 0) return round;
+  const done = new Set(round.done); const wrong = new Set(round.wrong);
+  done.delete(qid); wrong.delete(qid);
+  return { ids: round.ids.filter((id) => id !== qid), done, wrong };
+}
+
+/** 继续刷本组错题（US-37）：下一轮题池 = 上一轮答错的题（按上一轮顺序）；重练轮可再作答。 */
+function continueRound(app, ops) {
+  app.round = startRound(roundSummary(app.round).wrongIds);
+  app.order = app.round.ids.slice();
+  app.roundReplay = true;
+  goTo(app, 0, ops);
+}
+
+/** 重刷本组：用本组当前池重建第 1 轮（同属重练，可再作答）。 */
+function restartRound(app, ops) {
+  app.order = orderFor(app, app.group.mode, app.group.type);
+  app.round = startRound(app.order);
+  app.roundReplay = true;
+  goTo(app, 0, ops);
+}
+
+__MODULES__["src/ui/round-ops.mjs"] = { dropFromRound: dropFromRound, continueRound: continueRound, restartRound: restartRound };
+}());
+(function () {
+// 首页开关 / 提示 / 字号这些「界面偏好动作」：由 app.mjs 迁出，守 N8 行数纪律。
+// 共同点：都只写 `app.uiState` + 落存储 + 重绘，不碰作答与统计。
+const { cycleFontLevel } = __MODULES__["src/ui/font.mjs"];
+const { uiFlag } = __MODULES__["src/ui/groups.mjs"];
+const { saveUiState } = __MODULES__["src/ui/session.mjs"];
+
+/** 「只练没掌握的」开关（R16 / KD-21）：切换先取消在用排程，再落存储重绘。 */
+function toggleUnmasteredOnly(app, ops) {
+  ops.cancelAdvance(app);
+  app.uiState = Object.assign({}, app.uiState, {
+    practiceUnmasteredOnly: !uiFlag(app, 'practiceUnmasteredOnly'),
+  });
+  saveUiState(app);
+  ops.render(app);
+}
+
+/** 「乱序」开关（R20）：种子只在首次开启时生成一次，此后固定。 */
+function toggleShuffled(app, ops) {
+  ops.cancelAdvance(app);
+  const on = !uiFlag(app, 'practiceShuffled');
+  const next = Object.assign({}, app.uiState, { practiceShuffled: on });
+  if (on && typeof next.shuffleSeed !== 'number') next.shuffleSeed = Math.floor(Math.random() * 0x7fffffff);
+  app.uiState = next;
+  saveUiState(app);
+  ops.render(app);
+}
+
+/** 关掉「添加到主屏幕」提示条（§2.19 C）。 */
+function dismissInstallHint(app, ops) {
+  app.uiState = Object.assign({}, app.uiState, { installHintDismissed: true });
+  saveUiState(app);
+  ops.render(app);
+}
+
+/** R31（§2.19 B）：点一下换一档（循环 0→1→2→0）——套用 + 落存储 + 重绘首页。 */
+function cycleFont(app, ops) {
+  cycleFontLevel();
+  ops.render(app);
+}
+
+__MODULES__["src/ui/ui-ops.mjs"] = { toggleUnmasteredOnly: toggleUnmasteredOnly, toggleShuffled: toggleShuffled, dismissInstallHint: dismissInstallHint, cycleFont: cycleFont };
+}());
+(function () {
 // 数据备份 / 恢复（US-40 / §2.11.15）：本机存储 ↔ 一个 JSON 文件。
 // 为什么需要：浏览器按**网址**隔离存储——换设备、换网址（含 GitHub Pages）时，题库与进度不会自己跟过去。
 const { el } = __MODULES__["src/ui/dom.mjs"];
@@ -4540,6 +4616,9 @@ function backupBlock(app, refresh) {
         on: { click: () => pickFile(app, refresh) },
       }),
     ]),
+    // 版本号（§2.12.6）：手机上一眼就能看出当前是不是最新构建
+    el('p', { class: 'matrix-hint version-line', dataset: { versionLine: 'true' },
+      text: `版本 v${globalThis.EXAM_MEMO_VERSION || '0.0.0'}` }),
   ]);
 }
 
@@ -4672,11 +4751,12 @@ function renderEntryMatrix(container, view) {
       on: { click: view.onImport },
     }),
   ]));
-
   // 「已斩题」区块（US-34 / KD-44）：入口矩阵的末块——背题区之后；前三块的 data-mode 序列一位不动
   screen.appendChild(renderKilledBlock(view));
   // 数据备份 / 恢复（US-40）：整页最后一块
   if (view.backup) screen.appendChild(view.backup);
+  // 低频动作收进页尾：导入题库（换库时才用）不再夹在入口区中间
+
 
   add(container, screen);
 }
@@ -4832,6 +4912,8 @@ const { releaseSheetEscape, sheetModel } = __MODULES__["src/ui/sheet.mjs"];
 const { clearMastered } = __MODULES__["src/ui/wrongbook-ops.mjs"];
 const { enterGroup, goTo, memorizePick, persistProgress, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
 const { cardView, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
+const { continueRound, dropFromRound, restartRound } = __MODULES__["src/ui/round-ops.mjs"];
+const { cycleFont, dismissInstallHint, toggleShuffled, toggleUnmasteredOnly } = __MODULES__["src/ui/ui-ops.mjs"];
 const { backupBlock } = __MODULES__["src/ui/backup.mjs"];
 const { renderEntryMatrix } = __MODULES__["src/ui/stats.mjs"];
 
@@ -4929,13 +5011,13 @@ function renderMatrix(app) {
     onOpenKilled: () => { app.view = 'killed'; render(app); },
     backup: backupBlock(app, () => render(app)), // US-40：备份 / 恢复（换设备 / 换网址搬数据）
     onClearMastered: () => clearMastered(app, APP_OPS),
-    onToggleUnmasteredOnly: () => toggleUnmasteredOnly(app),
-    onToggleShuffled: () => toggleShuffled(app),
+    onToggleUnmasteredOnly: () => toggleUnmasteredOnly(app, APP_OPS),
+    onToggleShuffled: () => toggleShuffled(app, APP_OPS),
     fontLevel: currentFontLevel(), // R31（§2.19 B）：当前档（用户选择优先；无选择时宽屏默认「大」）
-    onCycleFont: () => cycleFont(app),
+    onCycleFont: () => cycleFont(app, APP_OPS),
     ui: app.uiState,
     notice: app.notice,
-    onDismissInstallHint: () => dismissInstallHint(app),
+    onDismissInstallHint: () => dismissInstallHint(app, APP_OPS),
   });
 }
 
@@ -5007,7 +5089,7 @@ function renderQuestion(app) {
     onSelfAssess: (correct) => selfAssess(app, correct),
     onKill: () => killCurrent(app, APP_OPS), onOpenSheet: () => openSheet(app),
     onMemorizePick: () => memorizePick(app, APP_OPS), // US-42：背题点选 → 揭示 + 自动进下一题
-    onContinueRound: () => continueRound(app), onRestartRound: () => restartRound(app), onHome: () => exitGroup(app),
+    onContinueRound: () => continueRound(app, APP_OPS), onRestartRound: () => restartRound(app, APP_OPS), onHome: () => exitGroup(app),
   }));
 }
 
@@ -5126,62 +5208,6 @@ function openSheet(app) { app.sheetOpen = true; render(app); }
 function closeSheet(app) { app.sheetOpen = false; render(app); }
 function jumpTo(app, index) { app.sheetOpen = false; goTo(app, index, APP_OPS); }
 
-/** 斩掉本轮的题：本轮题池同步收敛（池 = 可见题组，完成判定才可达）。斩题与「移出本题」共用同一语义。 */
-function dropFromRound(round, qid) {
-  if (!round || round.ids.indexOf(qid) < 0) return round;
-  const done = new Set(round.done); const wrong = new Set(round.wrong);
-  done.delete(qid); wrong.delete(qid);
-  return { ids: round.ids.filter((id) => id !== qid), done, wrong };
-}
-
-/** 继续刷本组错题（US-37）：下一轮题池 = 上一轮答错的题（按上一轮顺序）；重练轮可再作答。 */
-function continueRound(app) {
-  app.round = startRound(roundSummary(app.round).wrongIds);
-  app.order = app.round.ids.slice();
-  app.roundReplay = true;
-  goTo(app, 0, APP_OPS);
-}
-
-/** 重刷本组：用本组当前池重建第 1 轮（同属重练，可再作答）。 */
-function restartRound(app) {
-  app.order = orderFor(app, app.group.mode, app.group.type);
-  app.round = startRound(app.order);
-  app.roundReplay = true;
-  goTo(app, 0, APP_OPS);
-}
-
-function toggleUnmasteredOnly(app) {
-  cancelAdvance(app);
-  app.uiState = Object.assign({}, app.uiState, {
-    practiceUnmasteredOnly: !uiFlag(app, 'practiceUnmasteredOnly'),
-  });
-  saveUiState(app);
-  render(app);
-}
-
-function toggleShuffled(app) {
-  cancelAdvance(app);
-  const on = !uiFlag(app, 'practiceShuffled');
-  const next = Object.assign({}, app.uiState, { practiceShuffled: on });
-  // 种子只在首次开启时生成一次，此后固定（R20）
-  if (on && typeof next.shuffleSeed !== 'number') next.shuffleSeed = Math.floor(Math.random() * 0x7fffffff);
-  app.uiState = next;
-  saveUiState(app);
-  render(app);
-}
-
-function dismissInstallHint(app) {
-  app.uiState = Object.assign({}, app.uiState, { installHintDismissed: true });
-  saveUiState(app);
-  render(app);
-}
-
-/** R31（§2.19 B）：点一下换一档（循环 0→1→2→0）——套用 + 落存储 + 重绘首页。 */
-function cycleFont(app) {
-  cycleFontLevel();
-  render(app);
-}
-
 function openImport(app) {
   app.flow = createImportFlow({
     inflateRaw,
@@ -5214,3 +5240,5 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 }());
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
+
+window.EXAM_MEMO_VERSION="1.1.1";
