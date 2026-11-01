@@ -371,7 +371,7 @@ const WEAK_THRESHOLD = 2;
 const MODE_LABELS = { memorize: '背题', practice: '练习' };
 const TYPE_LABELS = {
   all: '全部', single: '单选', multi: '多选', judge: '判断', fill: '填空', essay: '简答',
-  wrongbook: '错题本', numbers: '数字专项', weak: '易错题',
+  wrongbook: '错题本', numbers: '数字项', weak: '易错题',
 };
 
 /** 组键 = `mode|type`（§2.10.3）。 */
@@ -3570,9 +3570,21 @@ function killedView(app, render) {
  */
 function renderKilledPage(container, view) {
   const qids = view.killed || [];
+  // 2026-11-01 用户要求：两个动作（全部恢复 / 返回首页）提到最上面，不用滑到底
+  const actions = el('div', { class: 'actions killed-actions' }, [
+    el('button', {
+      class: 'btn btn-primary killed-restore-all',
+      type: 'button',
+      text: '全部恢复',
+      disabled: qids.length === 0,
+      on: { click: view.onRestoreAll },
+    }),
+    el('button', { class: 'btn killed-home', type: 'button', text: '返回首页', on: { click: view.onHome } }),
+  ]);
   const screen = el('main', { class: 'screen killed-view' }, [
     el('h1', { class: 'app-title', text: '已斩题' }),
     el('p', { class: 'matrix-hint', text: `已斩 ${qids.length} 题 · 斩掉的题不再出现在任何入口与考试抽题里。` }),
+    actions,
   ]);
   if (qids.length === 0) {
     screen.appendChild(el('p', { class: 'empty', text: '暂无已斩题。' }));
@@ -3592,16 +3604,6 @@ function renderKilledPage(container, view) {
       ]);
     })));
   }
-  screen.appendChild(el('div', { class: 'actions' }, [
-    el('button', {
-      class: 'btn btn-primary killed-restore-all',
-      type: 'button',
-      text: '全部恢复',
-      disabled: qids.length === 0,
-      on: { click: view.onRestoreAll },
-    }),
-    el('button', { class: 'btn killed-home', type: 'button', text: '返回首页', on: { click: view.onHome } }),
-  ]));
   clear(container);
   add(container, screen);
 }
@@ -5399,4 +5401,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.8.2";
+window.EXAM_MEMO_VERSION="1.8.3";
