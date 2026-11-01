@@ -2535,9 +2535,9 @@ __MODULES__["src/ui/bank-load.mjs"] = { loadBank: loadBank, adoptBank: adoptBank
 // 不 preventDefault（不吞页面滚动与输入框手势）、不引第三方库（N5 零依赖）、不用 closest()（DOM 桩不支持）。
 
 /** 触发滑动的最小水平位移（像素）。 */
-const SWIPE_MIN_PX = 48;
+const SWIPE_MIN_PX = 40;
 /** 方向占优比：水平位移须大于垂直位移的这么多倍才判为切题。 */
-const SWIPE_DOMINANCE = 1.5;
+const SWIPE_DOMINANCE = 1.2;
 /** 左缘保护带（像素）：起点在此之内不判右滑（避开 iOS 边缘返回手势）。 */
 const SWIPE_EDGE_GUARD_PX = 24;
 
@@ -5290,4 +5290,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.2.0";
+window.EXAM_MEMO_VERSION="1.2.1";
