@@ -128,8 +128,8 @@ html, body {
 .matrix-group {
   background: var(--card);
   border-radius: 14px;
-  padding: 12px 14px;
-  margin: 12px 0;
+  padding: 8px 12px;
+  margin: 8px 0;
 }
 .matrix-title {
   font-size: 1.0588rem;
@@ -138,9 +138,10 @@ html, body {
 .matrix-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin: 10px 0;
+  gap: 8px;
+  margin: 8px 0;
 }
+.matrix-grid .entry { min-height: 0; padding: 8px 12px; } /* 2026-11-01 版式：入口卡更紧凑 */
 .wrongbook-row {
   display: flex;
   gap: 10px;
@@ -626,7 +627,7 @@ select, input[type="text"] {
 }
 .sheet-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
   gap: 8px;
 }
 .sheet-cell {
