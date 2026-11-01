@@ -2442,8 +2442,30 @@ function registerServiceWorker() {
   }
 }
 
+/**
+ * 强制刷新（US-48）：注销全部 service worker + 清空所有 cache → 重载页面。
+ * 用途：主屏图标「划掉重开很多次才更新」的逃生锤——一次点击拿最新版（进度在 IndexedDB，不受影响）。
+ */
+async function forceRefresh() {
+  const nav = globalThis.navigator;
+  const location = globalThis.location;
+  try {
+    if (nav && nav.serviceWorker && nav.serviceWorker.getRegistrations) {
+      const regs = await nav.serviceWorker.getRegistrations();
+      for (const reg of regs) await reg.unregister();
+    }
+    if (globalThis.caches && globalThis.caches.keys) {
+      const keys = await globalThis.caches.keys();
+      for (const key of keys) await globalThis.caches.delete(key);
+    }
+  } catch (err) {
+    console.error('强制刷新清理失败', err); // 清理失败也照样重载，不让用户卡死
+  }
+  if (location && typeof location.reload === 'function') location.reload();
+}
 
-__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, loadKilled: loadKilled, persistKilled: persistKilled, loadStreaks: loadStreaks, persistStreaks: persistStreaks, preloadProgress: preloadProgress, loadUiState: loadUiState, enterGroup: enterGroup, goTo: goTo, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag, memorizePick: memorizePick, registerServiceWorker: registerServiceWorker };
+
+__MODULES__["src/ui/session.mjs"] = { loadWrongbook: loadWrongbook, loadKilled: loadKilled, persistKilled: persistKilled, loadStreaks: loadStreaks, persistStreaks: persistStreaks, preloadProgress: preloadProgress, loadUiState: loadUiState, enterGroup: enterGroup, goTo: goTo, persistProgress: persistProgress, persistWrongbook: persistWrongbook, saveUiState: saveUiState, writeDiag: writeDiag, memorizePick: memorizePick, registerServiceWorker: registerServiceWorker, forceRefresh: forceRefresh };
 }());
 (function () {
 // 题库装载（N8 拆分自 app.mjs）：读存储 / 内嵌题库、换表备份与重绘（§2.10.3 / §2.4.2）。
@@ -4722,7 +4744,13 @@ function renderEntryMatrix(container, view) {
   // 「已斩题」区块（US-34 / KD-44）：页尾动作行之后、版本号之前
   screen.appendChild(renderKilledBlock(view));
   // 页尾版本号（构建注入的内容指纹）：手机与仓库对一眼即知新旧（修复「滑掉不更新」无法自查）
-  if (view.version) screen.appendChild(el('p', { class: 'page-version', text: `版本 ${view.version}` }));
+  // 版本号即刷新入口（US-48，2026-11-01 用户反馈「要划掉重开很多次」）：轻点 = 注销 SW + 清缓存 + 重载
+  if (view.version) screen.appendChild(el('button', {
+    class: 'page-version',
+    type: 'button',
+    text: `版本 ${view.version} · 轻点刷新`,
+    on: { click: view.onForceRefresh },
+  }));
 
   add(container, screen);
 }
@@ -4923,7 +4951,7 @@ const { createImportFlow } = __MODULES__["src/ui/import.mjs"];
 const { killCurrent, killedView, renderKilledPage } = __MODULES__["src/ui/killed.mjs"];
 const { releaseSheetEscape, sheetModel } = __MODULES__["src/ui/sheet.mjs"];
 const { clearMastered } = __MODULES__["src/ui/wrongbook-ops.mjs"];
-const { enterGroup, goTo, memorizePick, persistProgress, persistStreaks, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
+const { enterGroup, forceRefresh, goTo, memorizePick, persistProgress, persistStreaks, persistWrongbook, registerServiceWorker, saveUiState, writeDiag } = __MODULES__["src/ui/session.mjs"];
 const { cardView, emptyTextFor, groupSummary, orderFor, uiFlag } = __MODULES__["src/ui/groups.mjs"];
 const { continueRound, dropFromRound, restartRound } = __MODULES__["src/ui/round-ops.mjs"];
 const { cycleFont, dismissInstallHint, setExamCount, setExamType, switchHomeTab, toggleShuffled, toggleUnmasteredOnly } = __MODULES__["src/ui/ui-ops.mjs"];
@@ -5038,6 +5066,7 @@ function renderMatrix(app) {
     killed: app.killed, // US-34：「已斩 N 题」末块 + 考试池 disabled 判据
     onOpenKilled: () => { app.view = 'killed'; render(app); },
     onClearMastered: () => clearMastered(app, APP_OPS),
+    onForceRefresh: () => forceRefresh(), // US-48：页尾版本号 = 一键强制刷新（注销 SW + 清缓存 + 重载）
     onToggleUnmasteredOnly: () => toggleUnmasteredOnly(app, APP_OPS),
     onToggleShuffled: () => toggleShuffled(app, APP_OPS),
     fontLevel: currentFontLevel(), // R31（§2.19 B）：当前档（用户选择优先；无选择时宽屏默认「大」）
@@ -5294,4 +5323,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.5.0";
+window.EXAM_MEMO_VERSION="1.6.0";
