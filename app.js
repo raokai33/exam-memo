@@ -4888,7 +4888,7 @@ function renderExamBlock(view) {
     dataset: { examType: value },
     on: { click: () => view.onSelectExamType(value) },
   })));
-  // 题数档（US-47）：10 / 20 / 39 / 全部
+  // 题数档（US-47）：10 / 20 / 50 / 全部
   const counts = el('div', { class: 'switch-row exam-counts' }, EXAM_COUNT_PRESETS.map((value) => el('button', {
     class: `btn exam-count${count === value ? ' on' : ''}`,
     type: 'button',
@@ -5387,4 +5387,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.8.6";
+window.EXAM_MEMO_VERSION="1.8.7";
