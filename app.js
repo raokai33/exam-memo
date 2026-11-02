@@ -4877,7 +4877,7 @@ function renderKilledBlock(view) {
 function renderExamBlock(view) {
   const questions = (view.bank && view.bank.questions) || [];
   const current = view.examType || 'all';
-  const count = view.examCount === undefined || view.examCount === null ? 39 : view.examCount;
+  const count = view.examCount === undefined || view.examCount === null ? 50 : view.examCount;
   // 预计题数 = min(本卷应有, 题池)；「全部」档 = 题池全部（planTotal 为 Infinity）
   const poolTotal = examPoolTotal(questions, view.killed, current, count);
   const target = Math.min(planTotal(current, count), poolTotal);
@@ -5123,7 +5123,7 @@ function renderMatrix(app) {
     onImport: () => openImport(app),
     onOpenExam: () => { openExam(app, render); }, // R29：模拟考试入口（§2.11.8）
     examType: (app.uiState && app.uiState.examType) || 'all', // US-45：考试题型选择
-    examCount: (app.uiState && app.uiState.examCount) || 39, // US-47：考试题数档（10 / 20 / 39 / 全部）
+    examCount: (app.uiState && app.uiState.examCount) || 50, // US-47：考试题数档（10 / 20 / 50 / 全部；缺省 = 标准卷 50）
     onSelectExamType: (type) => setExamType(app, type, APP_OPS),
     onSelectExamCount: (count) => setExamCount(app, count, APP_OPS),
     killed: app.killed, // US-34：「已斩 N 题」末块 + 考试池 disabled 判据
@@ -5387,4 +5387,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.8.5";
+window.EXAM_MEMO_VERSION="1.8.6";
