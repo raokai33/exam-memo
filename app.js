@@ -3541,9 +3541,9 @@ async function killCurrent(app, ops) {
   if (!qid || !app.group) return;
   ops.cancelAdvance(app); // 改定位 / 换题前先取消在用排程（自动前进 / 背题揭示）
   await killQuestion(app, qid);
-  // 2026-11-01 用户裁：背题模式斩题不弹提示（翻卡时打断）；练习模式给「可撤销」——手误会误斩
-  app.lastKill = app.group.mode === 'memorize' ? null : qid;
-  app.notice = app.group.mode === 'memorize' ? null : '已斩 · 可在首页恢复';
+  // 2026-11-02 用户裁：斩完不再弹任何提示（练习面也不弹）——恢复入口在首页「已斩 N 题」
+  app.lastKill = null;
+  app.notice = null;
   app.round = ops.dropFromRound(app.round, qid);
   app.order = app.roundReplay ? app.order.filter((id) => id !== qid) : orderFor(app, app.group.mode, app.group.type);
   if (app.order.length === 0) { app.index = 0; ops.resetQuestionState(app); ops.render(app); return; }
@@ -5401,4 +5401,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.8.3";
+window.EXAM_MEMO_VERSION="1.8.4";
