@@ -2912,11 +2912,8 @@ function renderCard(container, view) {
 
   const screen = el('main', { class: 'screen' }, [
     summary,
-    // 一次性提示（斩题）：练习面给「撤销」按钮（2026-11-01：手误会误斩）
-    view.notice ? el('p', { class: 'banner banner-warn card-notice' }, [
-      el('span', { text: view.notice }),
-      view.undoKill ? el('button', { class: 'btn btn-ghost undo-kill', type: 'button', text: '撤销', on: { click: view.onUndoKill } }) : null,
-    ].filter(Boolean)) : null,
+    // 一次性提示（斩题已在 2026-11-02 取消，此通道保留给其它一次性提示）
+    view.notice ? el('p', { class: 'banner banner-warn card-notice', text: view.notice }) : null,
     el('article', { class: 'card' }, [
       head,
       body,
@@ -4901,7 +4898,7 @@ function renderExamBlock(view) {
   })));
   return el('section', { class: 'matrix-group exam-block', dataset: { mode: 'exam' } }, [
     el('h2', { class: 'matrix-title', text: '模拟考试' }),
-    el('p', { class: 'matrix-hint', text: '按题型抽题成卷，限时作答；交卷后给总分与逐题对错。' }),
+    el('p', { class: 'matrix-hint', text: '按题型抽题成卷，不限时；交卷后给总分与逐题对错。' }),
     types,
     counts,
     el('button', {
@@ -5214,20 +5211,9 @@ function renderQuestion(app) {
     onEssaySubmit: (text) => submitEssay(app, text),
     onSelfAssess: (correct) => selfAssess(app, correct),
     onKill: () => killCurrent(app, APP_OPS), onOpenSheet: () => openSheet(app),
-    undoKill: app.lastKill || null,
-    onUndoKill: () => undoKill(app),
     onMemorizePick: () => memorizePick(app, APP_OPS), // US-42：背题点选 → 揭示 + 自动进下一题
     onContinueRound: () => continueRound(app, APP_OPS), onRestartRound: () => restartRound(app, APP_OPS), onHome: () => exitGroup(app),
   }));
-}
-/** 撤销上一次斩题（练习面横幅上的「撤销」，2026-11-01 治手误）：恢复该题并重进本组，题回到池子里。 */
-function undoKill(app) {
-  const qid = app.lastKill;
-  if (!qid || !app.group) return;
-  const group = { mode: app.group.mode, type: app.group.type };
-  app.lastKill = null;
-  app.notice = null;
-  restoreQuestion(app, qid).then(() => enterGroup(app, group.mode, group.type, APP_OPS));
 }
 
 
@@ -5401,4 +5387,4 @@ __MODULES__["src/ui/app.mjs"] = { mount: mount, MEMORIZE_REVEAL_MS: MEMORIZE_REV
 window.EXAM_MEMO = { mount: __MODULES__["src/ui/app.mjs"].mount, MEMORIZE_REVEAL_MS: __MODULES__["src/ui/app.mjs"].MEMORIZE_REVEAL_MS };
 }());
 
-window.EXAM_MEMO_VERSION="1.8.4";
+window.EXAM_MEMO_VERSION="1.8.5";
